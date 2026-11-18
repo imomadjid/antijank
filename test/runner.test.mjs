@@ -46,3 +46,16 @@ test('probe-path prints the probe location', () => {
   assert.equal(r.status, 0);
   assert.match(r.stdout.trim(), /probe\.js$/);
 });
+
+test('a record block settles only after its last step', () => {
+  const steps = JSON.stringify([{ record: [{ wait: 600 }, { eval: 'trigger()' }] }]);
+  const r = run(fixture('pop-in.html'), '--steps', steps);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /appeared at full opacity/);
+});
+
+test('--click with --steps is a setup error', () => {
+  const r = run(fixture('pop-in.html'), '--click', 'body', '--steps', trigger);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /--click or --steps/);
+});

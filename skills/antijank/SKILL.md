@@ -25,13 +25,27 @@ node <skill-dir>/scripts/run.mjs http://localhost:3000/settings            # rec
 
 - With Playwright's `page` object: `await page.addScriptTag({ path: '<skill-dir>/scripts/probe.js' })`. Use `page.addInitScript({ path })` instead to record a page load.
 - With only "evaluate JavaScript": evaluate the contents of `scripts/probe.js` once per page (it is safe to load twice).
+- A strict Content-Security-Policy can block the injected script. Use the runner, which turns CSP off for its own browser, or create the Playwright context with `bypassCSP: true`.
+
+When the action can run inside the page:
 
 ```js
 const result = await antijank.record(() => document.querySelector('#open').click(), { root: 'main' });
 antijank.report(); // the text report
 ```
 
-For actions you trigger from outside the page (a real click through your tool), call `antijank.start(opts)`, do the action, then `await` the promise `start` returned, or `antijank.stop()` to end early.
+`record` waits for the action's promise before it lets the recording settle, so an async action with several steps is recorded whole.
+
+When you drive the action from outside the page (real clicks and typing through your tool), hold the recording open until you are done:
+
+```js
+antijank.start({ root: 'main', hold: true }); // 1. evaluate
+// 2. click, type, wait: as many steps as the interaction needs
+await antijank.release(); // 3. evaluate: settles after the last step, resolves with the result
+antijank.report();
+```
+
+Without `hold`, the recording settles as soon as nothing has moved for about 330ms, which can fall between two of your steps. `antijank.stop()` ends a recording at once.
 
 ## Workflow
 
@@ -79,24 +93,29 @@ Pass `expect` (option or `--expect`) to get pass/fail lines and exit code 1 on f
 }
 ```
 
-- `moves`: net displacement from first to last frame, in px.
-- `still`: elements that must not move more than `maxShift`. Use `"others"` for everything present the whole time and not named elsewhere.
-- `fadesIn` and `fadesOut`: the element must start or end below 50% opacity.
+- `moves`: net displacement from first to last frame, in px. If the element is remounted, it follows whichever copy is on screen.
+- `still`: elements that must not move more than `maxShift`. Use `"others"` for everything present the whole time and not named elsewhere. A selector that matches nothing fails.
+- `fadesIn`: the element must be below 50% opacity on its first visible frame and at 90% or more at the end. `fadesOut`: below 50% on its last visible frame.
 - `noFindings`: no finding at or above that severity.
+- Any selector that matches nothing fails its expectation, so a typo can't pass silently.
 
 ## Keeping the report useful
 
-- Scope with `root` to the region that should react. It's faster and quieter. Portals added to `<body>` (dialogs, popovers) are still watched.
-- Only elements that draw something (text, background, border, shadow, images, inputs) can produce findings. Transparent wrappers stay silent, so their painted children report instead.
-- Infinite animations (spinners, shimmer) are ignored automatically. Mark anything else with `data-antijank-ignore`.
+- Scope with `root` to the region that should react. It's faster and quieter. Overlays added outside it are still watched: anything added straight to `<body>`, fixed-position elements, and dialogs, menus, popovers, tooltips and toasts (found by `role`, `aria-modal`, `popover` or `<dialog>`).
+- A `root` that doesn't exist yet is waited for. Whatever it holds when it appears is the baseline, so to judge how a panel appears, use a root that exists before it (or none).
+- Only elements that draw something (text, background, border, shadow, backdrop filter, `::before`/`::after` content, images, form controls) can produce findings. Transparent wrappers stay silent, so their painted children report instead.
+- Infinite CSS and Web Animations (spinners, shimmer) are ignored automatically. A JavaScript loop that never stops (a ticker) makes the recording time out; elements that changed in most frames are then left out and listed as loops. Mark anything else with `data-antijank-ignore`.
+- At most 1500 elements are watched from the start, plus 1000 added during the recording. Past that the report warns that findings may be missing; narrow `root`.
 - Streaming text grows continuously, so expect `shift` findings caused by "grew taller (text changed)". Judge whether that growth should be smoothed.
-- The header line shows the probe's cost per frame. If it is above about 4ms, narrow `root`.
+- The header line shows the probe's cost per frame: about 4ms for 1500 elements on a fast laptop, more with the CPU slowed. Reading layout after every frame can disturb a page that is already near its frame budget, so if the cost is above about 4ms, narrow `root`.
 - Thresholds can be overridden: `{ thresholds: { shift: 4, popArea: 1000 } }` (see `antijank.thresholds`).
 
 ## What it can't see
 
 - Pixels inside `<canvas>` or WebGL, and paint-only changes (a colour flash with no box or opacity change).
-- Clipping by `clip-path` or masks, and elements covered by others. Clipping by overflow is taken into account.
+- Clipping by `clip-path` or masks, and elements covered by others. Clipping by overflow is taken into account, including absolute and fixed elements escaping it.
+- Inside shadow DOM and iframes: the shadow host and the `<iframe>` box are watched, not their contents. Load the probe inside the frame to record it.
+- Shapes inside an `<svg>`: only the `<svg>` box is watched.
 - Hidden tabs: browsers pause frames there, so the probe refuses to record (`status: hidden`). Bring the tab or pane to the front.
 - Headless timing is close to real but not identical. Treat 1–2 frame differences as approximate.
 - Virtualized lists recycle nodes, so a recycled row can look like a jump. Scope `root` away from them, or ignore them.

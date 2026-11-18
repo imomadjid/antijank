@@ -1,0 +1,13 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.box{width:160px;height:96px;background:#4a7dff;color:#fff}.row{height:40px;margin:4px 16px;background:#dde5ff}</style><script src="_lib.js"></script>
+<title>clean: a linear slide where one frame takes 100ms (a dropped frame is not a jump)</title>
+<body><div id="box" class="box" style="margin:20px">Slide</div>
+<script>
+EXPECT = { allow: ["slow-frame"] };
+trigger = async () => {
+  let n = 0;
+  await tween(500, (p) => {
+    if (++n === 12) { const t = performance.now(); while (performance.now() - t < 100); }
+    box.style.transform = `translateX(${p * 300}px)`;
+  }, (t) => t);
+};
+</script>

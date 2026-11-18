@@ -45,7 +45,15 @@ for (const name of fixtures) {
         const extra = types.filter((t) => !ok.has(t));
         assert.deepEqual(extra, [], `unexpected findings${why}`);
       }
-      for (const e of result.expectations || []) assert.ok(e.pass, `expectation failed: ${e.name}: ${e.detail}${why}`);
+      // Expectations named in EXPECT.failing must fail; every other one must pass.
+      const failing = new Set(expect.failing || []);
+      for (const name of failing)
+        assert.ok((result.expectations || []).some((e) => e.name === name), `expected an expectation named "${name}"${why}`);
+      for (const e of result.expectations || [])
+        assert.equal(e.pass, !failing.has(e.name), `expectation ${e.pass ? 'passed' : 'failed'}: ${e.name}: ${e.detail}${why}`);
+      if (expect.message)
+        assert.ok(result.findings.some((f) => f.message.includes(expect.message)), `expected a message with "${expect.message}"${why}`);
+      if (expect.loops) assert.ok((result.loops || []).length > 0, `expected a loop to be left out${why}`);
       if (expect.cause) {
         const re = new RegExp(expect.cause);
         assert.ok(result.findings.some((f) => re.test(f.cause || '')), `expected a cause matching ${re}${why}`);

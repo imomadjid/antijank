@@ -44,13 +44,16 @@ Steps
    {"hover": ".card"}, {"eval": "document.body.classList.add('dark')"}, {"reload": true}]
 A record block that navigates (goto or reload) records the new page from its first frame.
 
-Exit codes: 0 ok, 1 expectation failed or --fail-on hit, 2 setup error.`;
+Every step in a record block runs before the recording may settle.
+Exit codes: 0 ok, 1 expectation failed or --fail-on hit, 2 setup error, hidden page or probe error.`;
 
 const SEV = { high: 3, medium: 2, low: 1 };
 
+// Setup errors end the run with exit code 2. Thrown rather than exiting at once, so output
+// already written to a pipe is flushed.
+class SetupError extends Error {}
 function fail(msg) {
-  console.error(`antijank: ${msg}`);
-  process.exit(2);
+  throw new SetupError(msg);
 }
 
 const readJson = (v, what) => {
@@ -109,6 +112,7 @@ function stepsFor(url, v) {
   let steps = readJson(v.steps, '--steps');
   const shared = { root: v.root, waitFor: v['wait-for'], expect: readJson(v.expect, '--expect') };
   if (steps) {
+    if (v.click) fail('use --click or --steps, not both (put the click in a record step)');
     if (!Array.isArray(steps)) fail('--steps must be a JSON array');
     if (!steps.some((s) => s.goto || s.reload)) steps = [{ goto: url }, ...steps];
     if (!steps.some((s) => s.record)) fail('--steps needs at least one {"record": [...]} step');
@@ -136,20 +140,26 @@ async function act(page, step, base) {
 }
 
 async function recordBlock(page, block, base, timeout) {
+  // hold: settling waits until every step in the block has run, then release() starts it.
   const opts = {
     root: block.root,
     waitFor: block.waitFor,
     expect: block.expect,
     timeout: block.timeout || timeout,
     ...(block.options || {}),
+    hold: true,
   };
-  const navigates = block.record.some((s) => s.goto || s.reload);
+  const nav = block.record.find((s) => s.goto || s.reload);
   let result;
-  if (navigates) {
+  if (nav) {
+    // Start on the first load of the target page only: not on iframes, other origins, or
+    // later loads in the same block.
+    const target = new URL(nav.goto ? new URL(nav.goto, base).href : page.url());
+    const origin = target.protocol === 'file:' ? 'file://' : target.origin; // Chromium's file: origin
     const nonce = Math.random().toString(36).slice(2);
     await page.addInitScript(
-      ({ nonce, opts }) => {
-        if (location.protocol === 'about:') return;
+      ({ nonce, opts, origin }) => {
+        if (window.top !== window || location.origin !== origin) return;
         try {
           if (sessionStorage.getItem('antijank:' + nonce)) return;
           sessionStorage.setItem('antijank:' + nonce, '1');
@@ -159,20 +169,18 @@ async function recordBlock(page, block, base, timeout) {
         if (window.antijank) window.antijank.start(opts);
         else window.__antijankAutostart = opts;
       },
-      { nonce, opts }
+      { nonce, opts, origin }
     );
     for (const s of block.record) await act(page, s, base);
-    await page.waitForFunction(() => window.antijank && !window.antijank.recording && window.antijank.result(), null, {
-      timeout: opts.timeout + 5000,
-    });
-    result = await page.evaluate(() => window.antijank.result());
+    const started = await page.evaluate(() => !!(window.antijank && (window.antijank.recording || window.antijank.result())));
+    if (!started) throw new Error(`the recording never started on ${page.url()} (did the page leave ${origin}?)`);
   } else {
     await page.evaluate((o) => {
-      window.__antijankDone = window.antijank.start(o);
+      window.antijank.start(o);
     }, opts);
     for (const s of block.record) await act(page, s, base);
-    result = await page.evaluate(() => window.__antijankDone);
   }
+  result = await page.evaluate(() => window.antijank.release());
   const report = await page.evaluate((r) => window.antijank.report(r), result);
   return { result, report };
 }
@@ -186,6 +194,8 @@ async function runCondition(pw, url, steps, cond, v) {
       hasTouch: cond.mobile,
       reducedMotion: cond.reducedMotion ? 'reduce' : 'no-preference',
       storageState: v['storage-state'] || undefined,
+      // The probe is injected as a script; a strict Content-Security-Policy would block it.
+      bypassCSP: true,
     });
     await context.addInitScript({ path: PROBE });
     const page = await context.newPage();
@@ -211,7 +221,8 @@ async function main() {
   const { values: v, positionals } = parse();
   if (v.help || !positionals.length) {
     console.log(HELP);
-    process.exit(v.help ? 0 : 2);
+    process.exitCode = v.help ? 0 : 2;
+    return;
   }
   if (positionals[0] === 'probe-path') {
     console.log(PROBE);
@@ -282,7 +293,10 @@ async function main() {
   const floor = SEV[v['fail-on']] || Infinity;
   const tooBad = all.some((r) => (r.result.findings || []).some((f) => SEV[f.severity] >= floor));
   const hidden = all.some((r) => r.result.status === 'hidden' || r.result.status === 'error');
-  process.exit(hidden ? 2 : failedExpect || tooBad ? 1 : 0);
+  process.exitCode = hidden ? 2 : failedExpect || tooBad ? 1 : 0;
 }
 
-main().catch((e) => fail(e.stack || String(e)));
+main().catch((e) => {
+  console.error(`antijank: ${e instanceof SetupError ? e.message : e.stack || e}`);
+  process.exitCode = 2;
+});

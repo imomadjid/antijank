@@ -1,0 +1,19 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.box{width:160px;height:96px;background:#4a7dff;color:#fff}.row{height:40px;margin:4px 16px;background:#dde5ff}</style><script src="_lib.js"></script>
+<title>planted: a multi-step action whose second step pops in after a pause</title>
+<body><div id="list"></div>
+<script>
+EXPECT = { has: ["pop-in"] };
+trigger = async () => {
+  const a = document.createElement("div");
+  a.className = "box";
+  a.textContent = "Faded in";
+  a.style.opacity = 0;
+  list.append(a);
+  await tween(200, (p) => (a.style.opacity = p));
+  await new Promise((r) => setTimeout(r, 600)); // longer than settling takes
+  const b = document.createElement("div");
+  b.className = "box";
+  b.textContent = "Popped in";
+  list.append(b);
+};
+</script>

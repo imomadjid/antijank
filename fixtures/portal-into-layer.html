@@ -1,0 +1,14 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.box{width:160px;height:96px;background:#4a7dff;color:#fff}.row{height:40px;margin:4px 16px;background:#dde5ff}</style><script src="_lib.js"></script>
+<title>planted: a dialog rendered into an existing overlay layer outside the watched root pops in</title>
+<body><main id="app"><div class="row">Page</div></main><div id="layer"></div>
+<script>
+EXPECT = { has: ["pop-in"] };
+OPTIONS = { root: "#app" };
+trigger = () => {
+  const d = document.createElement("div");
+  d.setAttribute("role", "dialog");
+  d.className = "box";
+  d.textContent = "Dialog";
+  layer.append(d);
+};
+</script>

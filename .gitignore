@@ -2,3 +2,4 @@ node_modules/
 .antijank/
 *.log
 .DS_Store
+.impeccable/

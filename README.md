@@ -53,6 +53,11 @@ Or load `skills/antijank/scripts/probe.js` into any page you already drive, such
 await antijank.record(() => document.querySelector('#compose').click(), { root: 'main' });
 console.log(antijank.report());
 antijank.timeline('[role=dialog]'); // per-frame x, y, w, h, opacity for one element
+
+// Steps driven from outside the page: hold the recording open, then release it.
+antijank.start({ root: 'main', hold: true });
+// ...click, type, wait...
+await antijank.release();
 ```
 
 ## What it reports
@@ -81,14 +86,18 @@ Expectations turn a recording into a test: `moves`, `still`, `fadesIn`, `fadesOu
 - Only changes are stored. Detectors run once, at the end.
 - A mutation observer names causes: inserted, removed, moved and resized elements.
 - The Layout Instability and Long Animation Frame APIs add layout-shift entries and slow-frame attribution.
-- Only elements that draw something can produce findings, and nested elements reporting the same thing collapse into the outermost one. Infinite animations and `[data-antijank-ignore]` are left out.
+- Only elements that draw something can produce findings, and nested elements reporting the same thing collapse into the outermost one. Infinite animations, JavaScript loops that never stop, and `[data-antijank-ignore]` are left out.
+- Overflow clipping follows containing blocks, so an absolute popover inside an `overflow: hidden` wrapper counts as visible when it is.
+- Jumps are judged per unit of time, so a dropped frame isn't mistaken for one.
 
-The probe reports its own cost per frame in the header line. It is usually well under a millisecond for a scoped `root`.
+The probe reports its own cost per frame in the header line. It grows with the number of watched elements: about 4ms per frame for 1,500 elements on a fast laptop, far less with a scoped `root`. Reading layout after every frame can disturb a page that is already near its frame budget, so keep `root` narrow.
 
 ## What it can't see
 
 - **Inside `<canvas>` and WebGL**, and paint-only changes such as a colour flash with no change in box or opacity.
 - **`clip-path`, masks, and elements covered by others.** Clipping by overflow is taken into account.
+- **Inside shadow DOM, iframes and `<svg>`.** The host, frame or `<svg>` box is watched, not what's inside it.
+- **Pages with a strict Content-Security-Policy**, when you inject the probe yourself. The runner turns CSP off for its own browser.
 - **Hidden tabs and panes.** Browsers pause frames there, so the probe refuses to record rather than return nothing.
 - **Exact timing.** Headless timing is close to a real display but not identical.
 
