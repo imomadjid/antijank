@@ -1,6 +1,5 @@
 # antijank
 
-[![skills.sh](https://skills.sh/b/MassiveMassimo/antijank)](https://skills.sh/MassiveMassimo/antijank)
 [![test](https://github.com/MassiveMassimo/antijank/actions/workflows/test.yml/badge.svg)](https://github.com/MassiveMassimo/antijank/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
