@@ -18,7 +18,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test \"test/*.test.mjs\""
   },
   "peerDependencies": {
     "playwright": ">=1.45"
