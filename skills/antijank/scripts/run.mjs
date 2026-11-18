@@ -146,9 +146,32 @@ async function recordBlock(page, block, base, timeout) {
     waitFor: block.waitFor,
     expect: block.expect,
     timeout: block.timeout || timeout,
+    // Playwright's own step timeouts bound the block; this only catches a hang.
+    holdTimeout: 10 * 60 * 1000,
     ...(block.options || {}),
     hold: true,
   };
+  // The recording lives in one document. A marker set in it is checked after every step,
+  // so a step that unexpectedly leaves the page is named instead of failing obscurely.
+  const mark = Math.random().toString(36).slice(2);
+  const setMark = () => page.evaluate((m) => (window.__antijankDoc = m), mark);
+  const sameDoc = () => page.evaluate((m) => window.__antijankDoc === m, mark).catch(() => false);
+  const runSteps = async (navigates) => {
+    let marked = false;
+    for (const [i, s] of block.record.entries()) {
+      await act(page, s, base);
+      if (s.goto || s.reload) {
+        if (marked) throw new SetupError(`step ${i + 1} (${JSON.stringify(s)}) loads a second page; a record block records one page load. Put it in its own record block.`);
+        await setMark();
+        marked = true;
+      } else if ((marked || !navigates) && !(await sameDoc())) {
+        throw new SetupError(
+          `step ${i + 1} (${JSON.stringify(s)}) navigated to ${page.url()}, which ends the recording. To record the new page, make that navigation a goto step in its own record block.`
+        );
+      }
+    }
+  };
+
   const nav = block.record.find((s) => s.goto || s.reload);
   let result;
   if (nav) {
@@ -171,16 +194,18 @@ async function recordBlock(page, block, base, timeout) {
       },
       { nonce, opts, origin }
     );
-    for (const s of block.record) await act(page, s, base);
+    await runSteps(true);
     const started = await page.evaluate(() => !!(window.antijank && (window.antijank.recording || window.antijank.result())));
-    if (!started) throw new Error(`the recording never started on ${page.url()} (did the page leave ${origin}?)`);
+    if (!started) throw new SetupError(`the recording never started on ${page.url()} (expected a page on ${origin})`);
   } else {
     await page.evaluate((o) => {
       window.antijank.start(o);
     }, opts);
-    for (const s of block.record) await act(page, s, base);
+    await setMark();
+    await runSteps(false);
   }
   result = await page.evaluate(() => window.antijank.release());
+  if (!result) throw new SetupError(`no recording result on ${page.url()}`);
   const report = await page.evaluate((r) => window.antijank.report(r), result);
   return { result, report };
 }
@@ -276,13 +301,15 @@ async function main() {
       for (const f of r.result.findings || []) {
         const key = `${r.name}|${f.severity}|${f.element}|${f.type}`;
         if (!seen.has(key)) seen.set(key, { f, name: r.name, hits: new Map() });
+        // Count runs, not findings: one run can report the same thing twice.
         const hits = seen.get(key).hits;
-        hits.set(r.condition, (hits.get(r.condition) || 0) + 1);
+        if (!hits.has(r.condition)) hits.set(r.condition, new Set());
+        hits.get(r.condition).add(r.run);
       }
     if (seen.size) {
       console.log('\n── summary');
       for (const { f, name, hits } of [...seen.values()].sort((a, b) => SEV[b.f.severity] - SEV[a.f.severity])) {
-        const where = conditions.map((c) => `${c.name} ${hits.get(c.name) || 0}/${runs}`).join(', ');
+        const where = conditions.map((c) => `${c.name} ${hits.has(c.name) ? hits.get(c.name).size : 0}/${runs}`).join(', ');
         console.log(`${f.severity.toUpperCase().padEnd(6)} ${name}: ${f.element} — ${f.message} (${where})`);
       }
     }

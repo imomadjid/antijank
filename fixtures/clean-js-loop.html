@@ -3,7 +3,7 @@
 <body><div id="track" style="margin:20px;width:400px;height:40px;overflow:hidden;position:relative"><div id="m" class="row" style="position:absolute;width:120px;margin:0">Ticker</div></div>
 <script>
 EXPECT = { none: true, loops: true };
-OPTIONS = { timeout: 1500 };
+OPTIONS = { timeout: 1500, expect: { still: "others" } };
 const loop = (t) => { m.style.transform = `translateX(${(t * 0.4) % 200}px)`; requestAnimationFrame(loop); };
 requestAnimationFrame(loop);
 trigger = () => {};

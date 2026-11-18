@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.box{width:160px;height:96px;background:#4a7dff;color:#fff}.row{height:40px;margin:4px 16px;background:#dde5ff}</style><script src="_lib.js"></script>
+<title>planted: a bar grows forever (streaming) while a box pops in; the growth must not hide the pop-in</title>
+<body><main><div id="bar" style="width:200px;height:4px;background:#4a7dff;margin:20px"></div></main>
+<script>
+EXPECT = { has: ["pop-in"] };
+OPTIONS = { timeout: 1500 };
+let w0 = 4;
+const grow = () => { bar.style.height = (w0 += 0.5) + "px"; requestAnimationFrame(grow); };
+requestAnimationFrame(grow);
+trigger = async () => {
+  await frames(30);
+  const c = document.createElement("div");
+  c.style.cssText = "position:fixed;top:200px;left:20px;width:200px;height:120px;background:#d33";
+  document.querySelector("main").append(c);
+};
+</script>

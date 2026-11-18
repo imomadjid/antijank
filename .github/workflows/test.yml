@@ -11,9 +11,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The runner supports Node 20+. Dependencies install with the pinned pnpm on Node 22,
-        # then the tests run on each supported Node.
-        node: [20, 22]
+        # The runner supports Node 22+. Dependencies install with the pinned pnpm on Node 22,
+        # then the tests run on each supported LTS.
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

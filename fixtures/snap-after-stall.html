@@ -1,0 +1,15 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.box{width:160px;height:96px;background:#4a7dff;color:#fff}.row{height:40px;margin:4px 16px;background:#dde5ff}</style><script src="_lib.js"></script>
+<title>planted: a frame-driven slide stalls for 70ms, then snaps 25px (a stall must not excuse the snap)</title>
+<body><div id="box" class="box" style="margin:20px">Slide</div>
+<script>
+EXPECT = { has: ["jump"], allow: ["slow-frame"] };
+trigger = async () => {
+  let x = 0;
+  for (let i = 1; i <= 30; i++) {
+    await frame();
+    if (i === 14) { const t = performance.now(); while (performance.now() - t < 70); }
+    x += i === 15 ? 28 : 3;
+    box.style.transform = `translateX(${x}px)`;
+  }
+};
+</script>

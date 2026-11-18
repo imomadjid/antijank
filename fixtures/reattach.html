@@ -3,6 +3,8 @@
 <body><div id="slot" style="margin:20px;height:96px"><div id="card" class="box">Card</div></div>
 <script>
 EXPECT = { has: ["pop-in", "pop-out"] };
+// Expectations must follow the element across its removal.
+OPTIONS = { expect: { still: ["#card"], moves: { "#card": { dx: 0, dy: 0 } } } };
 trigger = async () => {
   await frames(2);
   const c = card;

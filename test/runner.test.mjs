@@ -59,3 +59,9 @@ test('--click with --steps is a setup error', () => {
   assert.equal(r.status, 2);
   assert.match(r.stderr, /--click or --steps/);
 });
+
+test('a click that leaves the page is a named setup error', () => {
+  const r = run(fixture('nav-link.html'), '--click', '#go');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /step 1 .* navigated to .*pop-in\.html/);
+});

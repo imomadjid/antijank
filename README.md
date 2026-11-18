@@ -31,7 +31,7 @@ Then ask your agent to check an animation, or say what feels off ("the card flas
 
 ## Use it yourself
 
-The runner needs Node 20+ and Playwright in your project (`npm i -D playwright && npx playwright install chromium`).
+The runner needs Node 22+ and Playwright in your project (`npm i -D playwright && npx playwright install chromium`).
 
 ```bash
 # record what a click does, watching only <main>
@@ -87,6 +87,7 @@ Expectations turn a recording into a test: `moves`, `still`, `fadesIn`, `fadesOu
 - A mutation observer names causes: inserted, removed, moved and resized elements.
 - The Layout Instability and Long Animation Frame APIs add layout-shift entries and slow-frame attribution.
 - Only elements that draw something can produce findings, and nested elements reporting the same thing collapse into the outermost one. Infinite animations, JavaScript loops that never stop, and `[data-antijank-ignore]` are left out.
+- Elements that appear together because one subtree was inserted, or moved into place as streamed HTML is, are reported once, as that subtree.
 - Overflow clipping follows containing blocks, so an absolute popover inside an `overflow: hidden` wrapper counts as visible when it is.
 - Jumps are judged per unit of time, so a dropped frame isn't mistaken for one.
 

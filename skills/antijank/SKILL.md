@@ -11,7 +11,7 @@ It reports facts ("moved down 44px in one frame"), not taste. Judging whether a 
 
 ## Pick how to run it
 
-**A. The runner** (needs a shell, Node 20+ and Playwright in the project). Best default: headless, repeatable, can slow the CPU and emulate reduced motion.
+**A. The runner** (needs a shell, Node 22+ and Playwright in the project). Best default: headless, repeatable, can slow the CPU and emulate reduced motion.
 
 ```bash
 node <skill-dir>/scripts/run.mjs http://localhost:3000/inbox --click "button[aria-label='Compose']" --root main
@@ -23,7 +23,14 @@ node <skill-dir>/scripts/run.mjs http://localhost:3000/settings            # rec
 
 **B. A browser you already drive** (Playwright MCP, Chrome DevTools MCP, any tool that runs JavaScript in the page). Load the probe, then record around the action:
 
-- With Playwright's `page` object: `await page.addScriptTag({ path: '<skill-dir>/scripts/probe.js' })`. Use `page.addInitScript({ path })` instead to record a page load.
+- With Playwright's `page` object: `await page.addScriptTag({ path: '<skill-dir>/scripts/probe.js' })`.
+- To record a page load, the probe has to start before the page's own scripts. Add two init scripts, then load the page and wait for the result:
+  ```js
+  await page.addInitScript({ path: '<skill-dir>/scripts/probe.js' });
+  await page.addInitScript(() => antijank.start({ root: 'main' }));
+  await page.goto(url);
+  const result = await page.evaluate(() => antijank.wait());
+  ```
 - With only "evaluate JavaScript": evaluate the contents of `scripts/probe.js` once per page (it is safe to load twice).
 - A strict Content-Security-Policy can block the injected script. Use the runner, which turns CSP off for its own browser, or create the Playwright context with `bypassCSP: true`.
 
@@ -45,7 +52,7 @@ await antijank.release(); // 3. evaluate: settles after the last step, resolves 
 antijank.report();
 ```
 
-Without `hold`, the recording settles as soon as nothing has moved for about 330ms, which can fall between two of your steps. `antijank.stop()` ends a recording at once.
+Without `hold`, the recording settles as soon as nothing has moved for about 330ms, which can fall between two of your steps. A hold that is never released ends with an error after `holdTimeout` (60s by default). `antijank.wait()` resolves with the result once the recording ends; `antijank.stop()` ends it at once.
 
 ## Workflow
 
@@ -103,8 +110,9 @@ Pass `expect` (option or `--expect`) to get pass/fail lines and exit code 1 on f
 
 - Scope with `root` to the region that should react. It's faster and quieter. Overlays added outside it are still watched: anything added straight to `<body>`, fixed-position elements, and dialogs, menus, popovers, tooltips and toasts (found by `role`, `aria-modal`, `popover` or `<dialog>`).
 - A `root` that doesn't exist yet is waited for. Whatever it holds when it appears is the baseline, so to judge how a panel appears, use a root that exists before it (or none).
+- A subtree inserted at once (or moved into place, as streamed HTML is) is reported as one finding naming the subtree and how many elements it holds.
 - Only elements that draw something (text, background, border, shadow, backdrop filter, `::before`/`::after` content, images, form controls) can produce findings. Transparent wrappers stay silent, so their painted children report instead.
-- Infinite CSS and Web Animations (spinners, shimmer) are ignored automatically. A JavaScript loop that never stops (a ticker) makes the recording time out; elements that changed in most frames are then left out and listed as loops. Mark anything else with `data-antijank-ignore`.
+- Infinite CSS and Web Animations (spinners, shimmer) are ignored automatically. A JavaScript loop that never stops (a ticker) makes the recording time out; elements whose own position or opacity changed in most frames (for at least 60 frames) are then left out and listed as loops. Their parents and children are still judged on their own. Mark anything else with `data-antijank-ignore`.
 - At most 1500 elements are watched from the start, plus 1000 added during the recording. Past that the report warns that findings may be missing; narrow `root`.
 - Streaming text grows continuously, so expect `shift` findings caused by "grew taller (text changed)". Judge whether that growth should be smoothed.
 - The header line shows the probe's cost per frame: about 4ms for 1500 elements on a fast laptop, more with the CPU slowed. Reading layout after every frame can disturb a page that is already near its frame budget, so if the cost is above about 4ms, narrow `root`.
@@ -113,7 +121,7 @@ Pass `expect` (option or `--expect`) to get pass/fail lines and exit code 1 on f
 ## What it can't see
 
 - Pixels inside `<canvas>` or WebGL, and paint-only changes (a colour flash with no box or opacity change).
-- Clipping by `clip-path` or masks, and elements covered by others. Clipping by overflow is taken into account, including absolute and fixed elements escaping it.
+- Clipping by `clip-path` or masks, and elements covered by others. Clipping by overflow is taken into account, including absolute and fixed elements that escape it because their containing block is further out.
 - Inside shadow DOM and iframes: the shadow host and the `<iframe>` box are watched, not their contents. Load the probe inside the frame to record it.
 - Shapes inside an `<svg>`: only the `<svg>` box is watched.
 - Hidden tabs: browsers pause frames there, so the probe refuses to record (`status: hidden`). Bring the tab or pane to the front.

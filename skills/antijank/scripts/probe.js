@@ -270,8 +270,12 @@
   function armBackstop(rec) {
     clearTimeout(rec.backstop);
     const ms = rec.held ? rec.opts.holdTimeout : rec.opts.timeout + 1000;
-    rec.backstop = setTimeout(() => finish(rec, rec.held ? 'error' : 'timeout', rec.held ? 'held without release()' : null), ms);
+    const why = `still held after ${rec.opts.holdTimeout}ms: the action never finished, or release() was never called (raise holdTimeout for longer actions)`;
+    rec.backstop = setTimeout(() => finish(rec, rec.held ? 'error' : 'timeout', rec.held ? why : null), ms);
   }
+
+  // The result of the recording in progress (or of the last one), once it ends.
+  const wait = () => (current ? current.done : Promise.resolve(last && last.result));
 
   // End a hold: settling starts counting now, so the last action's effects are recorded.
   function release() {
@@ -308,6 +312,7 @@
     rec.roots = roots;
     rec.baseF = f;
     for (const root of roots) collect(rec, root, f);
+    rec.baseCount = rec.tracks.size;
   }
 
   function ignoredEl(rec, el) {
@@ -319,8 +324,9 @@
 
   function collect(rec, root, f) {
     if (root.nodeType !== 1 || SKIP_TAGS.has(root.tagName) || ignoredEl(rec, root)) return;
+    if (root.namespaceURI === SVG_NS && root.localName !== 'svg') return; // only the <svg> box
     const sel = rec.opts.ignore;
-    if (!addTrack(rec, root, f)) return;
+    addTrack(rec, root, f);
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
       acceptNode(n) {
         if (SKIP_TAGS.has(n.tagName)) return NodeFilter.FILTER_REJECT;
@@ -330,7 +336,8 @@
       },
     });
     let n;
-    while ((n = walker.nextNode())) if (!addTrack(rec, n, f)) break;
+    // Over budget, keep walking only to count what was left out.
+    while ((n = walker.nextNode())) addTrack(rec, n, f);
   }
 
   const liveTrack = (rec, el) => {
@@ -341,7 +348,7 @@
   function addTrack(rec, el, f) {
     if (liveTrack(rec, el)) return true;
     // Elements added later get their own budget, so a full page can't starve a new dialog.
-    const cap = f === rec.baseF ? rec.opts.maxElements : rec.opts.maxElements + rec.opts.maxAdded;
+    const cap = f === rec.baseF ? rec.opts.maxElements : rec.baseCount + rec.opts.maxAdded;
     if (rec.tracks.size >= cap) {
       rec.truncated++;
       return false;
@@ -373,10 +380,13 @@
   // Overlays rendered outside the watched root: straight into <body>, or into a layer
   // container that already existed (dialogs, menus, popovers, toasts).
   const OVERLAY = 'dialog, [popover], [aria-modal="true"], [role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [role="tooltip"], [role="status"], [role="alert"]';
+  // Inside a wrapper, only modal-like overlays count: a status line deep in a re-rendered
+  // sidebar shouldn't pull the whole sidebar in.
+  const MODAL = 'dialog, [popover], [aria-modal="true"], [role="dialog"], [role="alertdialog"]';
   function isPortal(el) {
     if (el.parentElement === document.body) return true;
     try {
-      if (el.matches(OVERLAY) || el.querySelector(OVERLAY)) return true;
+      if (el.matches(OVERLAY) || el.querySelector(MODAL)) return true;
     } catch (_) {
       /* old browser */
     }
@@ -508,12 +518,19 @@
   }
   const scaled = (cs) => (cs.transform && cs.transform !== 'none') || (cs.scale && cs.scale !== 'none');
   // Establishes a containing block for absolutely (abs) or fixed-positioned (fix) descendants.
+  const set = (v) => !!v && v !== 'none';
   const containsFixed = (cs) =>
-    cs.transform !== 'none' ||
-    cs.filter !== 'none' ||
-    (cs.perspective && cs.perspective !== 'none') ||
+    set(cs.transform) ||
+    set(cs.translate) ||
+    set(cs.rotate) ||
+    set(cs.scale) ||
+    set(cs.filter) ||
+    set(cs.backdropFilter) ||
+    set(cs.perspective) ||
+    cs.transformStyle === 'preserve-3d' ||
+    cs.contentVisibility === 'auto' ||
     /paint|layout|strict|content/.test(cs.contain || '') ||
-    /transform|filter|perspective/.test(cs.willChange || '') ||
+    /transform|translate|rotate|scale|filter|perspective/.test(cs.willChange || '') ||
     (cs.containerType && cs.containerType !== 'normal');
   const containsAbs = (cs) => cs.position !== 'static' || containsFixed(cs);
 
@@ -820,10 +837,13 @@
       for (let i = r.p; i <= r.q; i++) {
         // Compared with its neighbours, so a fast middle of an eased move isn't a jump; per
         // unit of time, so a dropped frame isn't one either.
+        // The excess over what this frame's duration explains, so a snap right after a stall
+        // still counts.
         const near = [];
         for (const k of [i - 2, i - 1, i + 1, i + 2]) if (k >= r.p && k <= r.q) near.push(speed(k));
         const m = median(near);
-        if (near.length && Math.abs(d(i)) >= T.jumpMin && speed(i) >= T.jumpRatio * Math.max(m, T.eps)) {
+        const excess = Math.abs(d(i)) - m * wt[i];
+        if (near.length && excess >= Math.max(T.jumpMin, (T.jumpRatio - 1) * Math.max(m, T.eps))) {
           out.push({ type: 'jump', f: i, amount: d(i), where: i === r.p ? 'start' : i === r.q ? 'end' : 'mid', travel, perFrame: m });
           jumpAt = i;
         }
@@ -962,12 +982,24 @@
     const findings = [];
     // Never settled: elements that changed in most frames are loops (a JS ticker, a marquee),
     // not transitions. Leave them out instead of reporting every frame of them.
+    // Each element is judged on its own movement and opacity: a parent that only grows
+    // because a child streams text is not a loop, and neither are its other children.
     const loops = [];
-    if (rec.status === 'timeout' && F >= 60) {
-      for (const t of rec.tracks.values()) if (!t.skip && t.rows.length >= 0.6 * (F - t.born)) loops.push(t);
+    if (rec.status === 'timeout') {
+      for (const t of rec.tracks.values()) {
+        const span = (t.died === null ? F : t.died) - t.born;
+        if (t.skip || span < 60) continue;
+        let own = 0;
+        for (let i = 1; i < t.rows.length; i++) {
+          const a = t.rows[i - 1];
+          const b = t.rows[i];
+          if (Math.abs(a[VX] - b[VX]) > 0.01 || Math.abs(a[VY] - b[VY]) > 0.01 || Math.abs(a[O] - b[O]) > 0.001) own++;
+        }
+        if (own >= 0.6 * span) loops.push(t);
+      }
     }
-    const inLoop = (t) => loops.some((l) => l.el.contains(t.el));
-    const tracks = [...rec.tracks.values()].filter((t) => !t.skip && !inLoop(t));
+    rec.loops = new Set(loops);
+    const tracks = [...rec.tracks.values()].filter((t) => !t.skip && !rec.loops.has(t));
     const scrolled = new Array(F).fill(false);
     const scrollSources = [...rec.scrollers.values()];
     if (rec.win) scrollSources.push(rec.win);
@@ -1004,15 +1036,22 @@
       if (tr.text) for (const e of stretchEvents(s, T)) add(e, null);
     }
 
-    // Did content inside this scroller visibly move on screen in frame f? Scroll anchoring
-    // changes scrollTop to cancel out an insertion above, so nothing on screen moves.
-    const visiblyMoved = (sc, f, axis) =>
-      tracks.some((t) => {
-        if (!t.paints || (sc.el && !sc.el.contains(t.el))) return false;
+    // Scroll anchoring moves the scroll position to cancel out an insertion above: content
+    // is pushed down in the page by the same amount and stays put on screen. Only that
+    // evidence silences a scroll jump, so a narrow root (or a fixed one) can't hide a real one.
+    const anchored = (sc, f, axis, delta) => {
+      let still = false;
+      for (const t of tracks) {
+        if (!t.paints || (sc.el && !sc.el.contains(t.el))) continue;
         const s = S.get(t);
         const v = axis === 'x' ? s.vx : s.vy;
-        return (s.a[f] > 0 || s.a[f - 1] > 0) && v[f] != null && v[f - 1] != null && Math.abs(v[f] - v[f - 1]) >= T.shift;
-      });
+        const c = axis === 'x' ? s.cx : s.cy;
+        if (!(s.a[f] > 0 || s.a[f - 1] > 0) || v[f] == null || v[f - 1] == null) continue;
+        if (Math.abs(v[f] - v[f - 1]) >= T.shift) return false; // something visibly moved
+        if (Math.abs(c[f] - c[f - 1] - delta) <= Math.max(2, 0.1 * Math.abs(delta))) still = true;
+      }
+      return still;
+    };
     for (const sc of scrollSources) {
       const name = sc.el ? describe(sc.el) : 'window';
       for (const [col, axis] of [[1, 'y'], [2, 'x']]) {
@@ -1025,7 +1064,7 @@
         }
         for (const e of axisEvents(xs, { ...T, shift: T.scrollJump, jumpMin: T.scrollJump }, wt)) {
           if (e.type === 'shift' || e.type === 'jump' || e.type === 'blip') {
-            if (visiblyMoved(sc, e.f, axis)) findings.push({ type: 'scroll-jump', f: e.f, amount: e.amount, axis, scroller: name });
+            if (!anchored(sc, e.f, axis, e.amount)) findings.push({ type: 'scroll-jump', f: e.f, amount: e.amount, axis, scroller: name });
           } else if (e.type === 'oscillation' || (e.type === 'reversal' && e.amount >= 4))
             findings.push({ type: 'scroll-fight', f: e.f, amount: e.amount, count: e.count || 1, axis, scroller: name });
         }
@@ -1106,7 +1145,7 @@
       findings: out,
       counts: { high: 0, medium: 0, low: 0 },
       expectations: rec.opts.expect ? check(rec, rec.opts.expect, S, out) : [],
-      loops: loops.filter((t) => !loops.some((o) => o !== t && o.el.contains(t.el))).slice(0, 5).map(descOf),
+      loops: loops.filter((t) => !loops.some((o) => o.el !== t.el && o.el.contains(t.el))).slice(0, 5).map(descOf),
       layoutShifts: rec.layoutShifts.map((l) => ({ ...l, t: Math.round(l.t), value: round(l.value, 4) })),
       slowFrames: rec.loafs.map((l) => ({ ...l, t: Math.round(l.t), duration: Math.round(l.duration) })),
       animations: [...rec.anims.values()]
@@ -1119,7 +1158,7 @@
       const tail = F - Math.min(F, rec.opts.settleFrames);
       const busy = tracks.filter((t) => t.paints && t.rows.length > 1 && t.rows[t.rows.length - 1][F_] >= tail);
       result.stillChanging = busy
-        .filter((t) => !busy.some((o) => o !== t && o.el.contains(t.el)))
+        .filter((t) => !busy.some((o) => o.el !== t.el && o.el.contains(t.el)))
         .slice(0, 5)
         .map(descOf);
       for (const [anim, a] of rec.anims)
@@ -1224,7 +1263,7 @@
       case 'swap':
         return `replaced ${x.from} in place with no crossfade`;
       case 'scroll-jump':
-        return `scroll jumped ${px(n)} ${n > 0 ? 'down' : 'up'} in one frame`;
+        return `scroll jumped ${px(n)} ${dirWord(x.axis || 'y', n)} in one frame`;
       case 'scroll-fight':
         return `scroll changed direction ${x.count} time${x.count > 1 ? 's' : ''} (±${px(n)}): two things scrolling it?`;
       case 'slow-frame':
@@ -1278,25 +1317,39 @@
     const sameThing = (a, b) =>
       a.type === b.type && a.f === b.f && a.axis === b.axis && Math.abs((a.amount || 0) - (b.amount || 0)) <= 1;
     const kept = raw.filter(
-      (x) => !x.tr || !raw.some((o) => o !== x && o.tr && o.tr !== x.tr && o.tr.el.contains(x.tr.el) && sameThing(o, x))
+      (x) => !x.tr || !raw.some((o) => o !== x && o.tr && o.tr.el !== x.tr.el && o.tr.el.contains(x.tr.el) && sameThing(o, x))
     );
     // Merge siblings doing the same thing at once ("li ×14 moved down 12px").
     const groups = new Map();
     let solo = 0;
     for (const x of kept) {
-      // Siblings: same parent and tag. `n` is the group size; `count` belongs to the finding.
-      const key = x.tr
-        ? `${x.type}|${x.f}|${x.axis}|${Math.round(x.amount || 0)}|${x.tr.parent}|${x.tr.el.localName}`
-        : `solo${solo++}`;
+      // Elements that appear together because one subtree was inserted are one event,
+      // reported as that subtree. Otherwise siblings (same parent and tag) doing the same
+      // thing merge. `n` is the group size; `count` belongs to the finding.
+      let inserted = null;
+      if (x.tr && (x.type === 'pop-in' || x.type === 'flash')) {
+        const m = rec.mutations[x.f] || rec.mutations[x.tr.born];
+        // Inserted, or moved into place (streamed HTML is revealed by moving a hidden subtree).
+        if (m) inserted = [...m.added, ...m.moved].find((a) => a !== x.tr.el && a.contains(x.tr.el)) || null;
+      }
+      const key = !x.tr
+        ? `solo${solo++}`
+        : inserted
+          ? `${x.type}|${x.f}|in${idOf(inserted)}`
+          : `${x.type}|${x.f}|${x.axis}|${Math.round(x.amount || 0)}|${x.tr.parent}|${x.tr.el.localName}`;
       const g = groups.get(key);
       if (g) g.n++;
-      else groups.set(key, { ...x, n: 1 });
+      else groups.set(key, { ...x, n: 1, inserted });
     }
     const list = [...groups.values()].map((x) => {
       const sev = severity(x, T);
       const t = Math.round(rec.frames[x.f] || 0);
       let element = x.tr ? descOf(x.tr) : x.el ? describe(x.el) : x.scroller || 'page';
-      if (x.n > 1) element += ` ×${x.n}`;
+      if (x.inserted && x.n > 1) {
+        element = `${describe(x.inserted)} (${x.n} elements)`;
+        const r = x.inserted.getBoundingClientRect();
+        if (x.inserted.isConnected && r.width) Object.assign(x, { w: r.width, h: r.height });
+      } else if (x.n > 1) element += ` ×${x.n}`;
       const moving = new Set(kept.filter((k) => k.f === x.f && k.tr).map((k) => k.tr));
       const cause = x.type === 'shift' || x.type === 'blip' ? causeAt(rec, x.f, S, sizeChanged, moving) : '';
       return {
@@ -1316,16 +1369,34 @@
 
   // ---------- expectations ----------
 
+  // One track per element: a node removed and put back has several, joined here with a
+  // blank gap (not rendered) between them.
+  function stitch(trs) {
+    if (trs.length === 1) return trs[0];
+    trs = trs.slice().sort((a, b) => a.born - b.born);
+    const rows = [];
+    trs.forEach((t, i) => {
+      rows.push(...t.rows);
+      if (i < trs.length - 1 && t.died !== null) rows.push([t.died, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+    });
+    rows.sort((a, b) => a[F_] - b[F_]);
+    const lastT = trs[trs.length - 1];
+    return { ...lastT, born: trs[0].born, died: lastT.died, rows, last: rows[rows.length - 1] };
+  }
+
   function matching(rec, sel) {
-    const out = [];
+    const byEl = new Map();
     for (const tr of rec.tracks.values()) {
       try {
-        if (tr.el.matches(sel)) out.push(tr);
+        if (!tr.el.matches(sel)) continue;
       } catch (_) {
         return [];
       }
+      if (!byEl.has(tr.el)) byEl.set(tr.el, []);
+      byEl.get(tr.el).push(tr);
     }
-    return out.filter((t) => !out.some((o) => o !== t && o.el.contains(t.el)));
+    const out = [...byEl.values()].map(stitch);
+    return out.filter((t) => !out.some((o) => o.el !== t.el && o.el.contains(t.el)));
   }
   const firstLast = (xs) => {
     let a = null;
@@ -1348,7 +1419,7 @@
         return null;
       }
     }
-    const trs = all.filter((t) => !all.some((o) => o !== t && o.el.contains(t.el))).sort((a, b) => b.born - a.born);
+    const trs = all.filter((t) => !all.some((o) => o.el !== t.el && o.el.contains(t.el))).sort((a, b) => b.born - a.born);
     if (!trs.length) return null;
     const F = rec.frames.length;
     const out = { vx: [], vy: [], o: [], a: [], rendered: [], trs };
@@ -1421,6 +1492,7 @@
         trs = [...rec.tracks.values()].filter(
           (t) =>
             !t.skip &&
+            !(rec.loops && rec.loops.has(t)) &&
             t.paints &&
             t.born === firstFrameOf(rec) &&
             t.died === null &&
@@ -1449,7 +1521,7 @@
         }
         if (worst > max) movers.push({ tr, worst });
       }
-      const top = movers.filter((m) => !movers.some((o) => o !== m && o.tr.el.contains(m.tr.el)));
+      const top = movers.filter((m) => !movers.some((o) => o !== m && o.tr.el !== m.tr.el && o.tr.el.contains(m.tr.el)));
       if (trs) out.push({
         name: `still ${spec.still === 'others' ? 'others' : [].concat(spec.still).join(', ')}`,
         pass: top.length === 0,
@@ -1543,6 +1615,7 @@
     start,
     stop,
     release,
+    wait,
     record,
     report,
     timeline,
