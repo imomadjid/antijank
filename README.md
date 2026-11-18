@@ -1,6 +1,6 @@
 # antijank
 
-[![test](https://github.com/MassiveMassimo/antijank/actions/workflows/test.yml/badge.svg)](https://github.com/MassiveMassimo/antijank/actions/workflows/test.yml)
+[![test](https://github.com/imomadjid/antijank/actions/workflows/test.yml/badge.svg)](https://github.com/imomadjid/antijank/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 <picture>
@@ -19,13 +19,13 @@ antijank measures instead of looking. A small probe reads every element's box, o
 ## Install
 
 ```bash
-npx skills add MassiveMassimo/antijank
+npx skills add imomadjid/antijank
 ```
 
 Or as a Claude Code plugin:
 
 ```text
-/plugin marketplace add MassiveMassimo/antijank
+/plugin marketplace add imomadjid/antijank
 /plugin install antijank@antijank
 ```
 

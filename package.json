@@ -4,10 +4,10 @@
   "description": "Headless animation review for coding agents: records how elements move and fade frame by frame and reports jank (jumps, flashes, pop-ins, pushed neighbours, scroll jumps) without screenshots.",
   "type": "module",
   "license": "MIT",
-  "author": "MassiveMassimo",
+  "author": "imomadjid",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/MassiveMassimo/antijank.git"
+    "url": "git+https://github.com/imomadjid/antijank.git"
   },
   "keywords": ["animation", "jank", "layout-shift", "flip", "agent-skills", "playwright", "claude-code"],
   "bin": {

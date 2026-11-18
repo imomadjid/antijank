@@ -2,8 +2,8 @@
   "name": "antijank",
   "version": "0.1.0",
   "description": "Headless animation review: records how elements move and fade frame by frame and reports jank without screenshots.",
-  "author": { "name": "MassiveMassimo" },
-  "repository": "https://github.com/MassiveMassimo/antijank",
+  "author": { "name": "imomadjid" },
+  "repository": "https://github.com/imomadjid/antijank",
   "license": "MIT",
   "keywords": ["animation", "jank", "layout-shift", "flip", "transitions"]
 }

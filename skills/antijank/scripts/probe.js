@@ -1,4 +1,4 @@
-/*! antijank probe | MIT | https://github.com/MassiveMassimo/antijank */
+/*! antijank probe | MIT | https://github.com/imomadjid/antijank */
 // Records how elements move and fade, frame by frame, and reports only what looks wrong:
 // one-frame jumps, flashes, pop-ins, reversals, pushed neighbours, late settles, scroll jumps.
 // No screenshots: everything comes from the DOM (boxes, effective opacity, scroll positions),
