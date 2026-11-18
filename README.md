@@ -1,5 +1,6 @@
 # antijank
 
+[![npm](https://img.shields.io/npm/v/antijank.svg)](https://www.npmjs.com/package/antijank)
 [![test](https://github.com/imomadjid/antijank/actions/workflows/test.yml/badge.svg)](https://github.com/imomadjid/antijank/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/imomadjid/antijank/blob/main/LICENSE)
 
