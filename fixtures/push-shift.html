@@ -1,0 +1,13 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.box{width:160px;height:96px;background:#4a7dff;color:#fff}.row{height:40px;margin:4px 16px;background:#dde5ff}</style><script src="_lib.js"></script>
+<title>planted: inserted row pushes the list down in one frame</title>
+<body><div id="list"><div class="row">a</div><div class="row">b</div><div class="row">c</div><div class="row">d</div></div>
+<script>
+EXPECT = { has: ["shift"], allow: ["pop-in"], cause: /inserted/ };
+trigger = () => {
+  const r = document.createElement("div");
+  r.className = "row";
+  r.id = "banner";
+  r.textContent = "Inserted banner";
+  list.prepend(r);
+};
+</script>

@@ -1,0 +1,13 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.box{width:160px;height:96px;background:#4a7dff;color:#fff}.row{height:40px;margin:4px 16px;background:#dde5ff}</style><script src="_lib.js"></script>
+<title>planted: a second animation drags the card back mid-move</title>
+<body><div class="box" id="card" style="margin:20px"></div>
+<script>
+EXPECT = { has: ["reversal"], allow: ["overshoot", "jump", "resettle"] };
+trigger = async () => {
+  let x = 0;
+  const set = () => (card.style.transform = `translateX(${x}px)`);
+  for (let i = 0; i < 8; i++) { x += 15; set(); await frame(); }
+  for (let i = 0; i < 4; i++) { x -= 10; set(); await frame(); }
+  for (let i = 0; i < 12; i++) { x += 15; set(); await frame(); }
+};
+</script>

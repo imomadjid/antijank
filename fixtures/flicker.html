@@ -1,0 +1,12 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.box{width:160px;height:96px;background:#4a7dff;color:#fff}.row{height:40px;margin:4px 16px;background:#dde5ff}</style><script src="_lib.js"></script>
+<title>planted: card vanishes for one frame</title>
+<body><div class="box" id="card" style="margin:20px">Card</div>
+<script>
+EXPECT = { has: ["flicker"] };
+trigger = async () => {
+  await frames(2);
+  card.style.opacity = "0";
+  await frames(2); // painted once at 0
+  card.style.opacity = "1";
+};
+</script>

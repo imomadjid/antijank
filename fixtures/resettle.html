@@ -1,0 +1,11 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.box{width:160px;height:96px;background:#4a7dff;color:#fff}.row{height:40px;margin:4px 16px;background:#dde5ff}</style><script src="_lib.js"></script>
+<title>planted: card lands in the wrong place, then corrects</title>
+<body><div class="box" id="card" style="margin:20px"></div>
+<script>
+EXPECT = { has: ["resettle"], allow: ["overshoot"] };
+trigger = async () => {
+  await tween(250, (p) => (card.style.transform = `translateX(${p * 260}px)`));
+  await frames(10);
+  await tween(200, (p) => (card.style.transform = `translateX(${260 + p * 30}px)`));
+};
+</script>

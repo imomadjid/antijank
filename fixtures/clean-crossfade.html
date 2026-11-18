@@ -1,0 +1,15 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.box{width:160px;height:96px;background:#4a7dff;color:#fff}.row{height:40px;margin:4px 16px;background:#dde5ff}</style><script src="_lib.js"></script>
+<title>clean: thumbnail crossfades into the card</title>
+<body><div id="stage" style="position:relative;margin:20px;height:200px"><div class="box" id="thumb" style="position:absolute;top:0;left:0">Thumb</div></div>
+<script>
+EXPECT = { none: true };
+trigger = async () => {
+  const c = document.createElement("div");
+  c.className = "box";
+  c.style.cssText = "position:absolute;top:0;left:0;background:#2d5be3;opacity:0";
+  c.textContent = "Card";
+  stage.append(c);
+  await tween(250, (p) => { c.style.opacity = String(p); thumb.style.opacity = String(1 - p); }, (t) => t);
+  thumb.remove();
+};
+</script>

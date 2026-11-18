@@ -1,0 +1,11 @@
+{
+  "name": "antijank",
+  "owner": { "name": "MassiveMassimo" },
+  "plugins": [
+    {
+      "name": "antijank",
+      "source": "./",
+      "description": "Headless animation review: records how elements move and fade frame by frame and reports jank without screenshots."
+    }
+  ]
+}

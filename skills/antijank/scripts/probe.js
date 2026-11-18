@@ -1,0 +1,1372 @@
+/*! antijank probe | MIT | https://github.com/MassiveMassimo/antijank */
+// Records how elements move and fade, frame by frame, and reports only what looks wrong:
+// one-frame jumps, flashes, pop-ins, reversals, pushed neighbours, late settles, scroll jumps.
+// No screenshots: everything comes from the DOM (boxes, effective opacity, scroll positions),
+// read after each frame is painted. Load it into a page, then:
+//   await antijank.record(() => button.click(), { root: 'main' })
+//   antijank.report()
+(() => {
+  if (typeof window === 'undefined' || (window.antijank && window.antijank.version)) return;
+
+  const VERSION = '0.1.0';
+
+  const THRESHOLDS = {
+    eps: 0.5, // px: movement below this is noise
+    shift: 2, // px: a one-frame move of a resting element worth reporting
+    bigShift: 8, // px: a one-frame move that is clearly visible
+    jumpRatio: 4, // a frame moving this many times the run's median is a jump
+    jumpMin: 6, // px: smallest jump worth reporting
+    bigJump: 16,
+    reversalBefore: 0.85, // turning back before this share of the move is a stutter
+    overshoot: 0.25, // overshoot past the end allowed as a share of the move (springs)
+    overshootMin: 4,
+    restFrames: 6, // frames at rest before a new move counts as "moved again"
+    popArea: 400, // px²: smallest visible area for pop-in / pop-out reports
+    bigArea: 10000,
+    flicker: 0.3, // opacity dip or spike that comes back
+    blipFrames: 3, // "comes back" within this many frames
+    scrollJump: 48,
+    slowFrame: 50, // ms
+    stretch: 0.06, // scaleX/scaleY mismatch for text
+  };
+
+  const DEFAULTS = {
+    root: null, // selector, element or array; default <body>
+    portals: true, // also watch elements added straight to <body> (dialogs, popovers)
+    // Scrollbar thumbs move whenever content grows; they are chrome, not content.
+    ignore: '[data-antijank-ignore], [role="scrollbar"], [data-slot*="scroll-area-scrollbar"], [data-slot*="scroll-area-thumb"], [data-radix-scroll-area-thumb]',
+    maxElements: 1500,
+    settleFrames: 20, // ~330ms at 60Hz: long enough to catch a late correction
+    minDuration: 100,
+    timeout: 5000,
+    waitFor: null, // selector or function; settling only counts once it is true
+    maxLines: 10,
+    expect: null,
+  };
+
+  const SKIP_TAGS = new Set([
+    'SCRIPT', 'STYLE', 'LINK', 'META', 'NOSCRIPT', 'TEMPLATE', 'BR', 'WBR', 'HEAD', 'TITLE',
+    'SOURCE', 'TRACK', 'PARAM', 'BASE', 'COL', 'COLGROUP', 'DATALIST', 'OPTION', 'OPTGROUP',
+  ]);
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const SEV = { high: 3, medium: 2, low: 1 };
+  const LAYOUT_PROP =
+    /^(width|height|top|left|right|bottom|inset|margin|padding|minWidth|minHeight|maxWidth|maxHeight|flexBasis|gridTemplate|fontSize|lineHeight|borderWidth)/;
+
+  // Row layout: [frame, vx, vy, cx, cy, w, h, opacity, visibleArea, stretch, rendered]
+  const F_ = 0, VX = 1, VY = 2, CX = 3, CY = 4, W = 5, H = 6, O = 7, A = 8, K = 9, R = 10;
+
+  let current = null;
+  let last = null;
+  const ids = new WeakMap();
+  let nextId = 1;
+  const idOf = (el) => {
+    let id = ids.get(el);
+    if (!id) ids.set(el, (id = nextId++));
+    return id;
+  };
+  const styles = new WeakMap();
+  const styleOf = (el) => {
+    let cs = styles.get(el);
+    if (!cs) styles.set(el, (cs = getComputedStyle(el)));
+    return cs;
+  };
+
+  // ---------- describing elements ----------
+
+  const squash = (s, n) => {
+    s = String(s).replace(/\s+/g, ' ').trim();
+    return s.length > n ? s.slice(0, n - 1) + '…' : s;
+  };
+  const ownText = (el) => {
+    let t = '';
+    for (const n of el.childNodes) if (n.nodeType === 3) t += n.data;
+    return t.trim();
+  };
+  function describe(el) {
+    if (!el || el.nodeType !== 1) return String(el);
+    let s = el.tagName.toLowerCase();
+    if (el.id && !/^[:«r]|\d{3,}/.test(el.id)) return s + '#' + el.id;
+    let named = false;
+    for (const a of ['data-testid', 'data-slot', 'aria-label', 'role', 'name']) {
+      const v = el.getAttribute(a);
+      if (v) {
+        s += `[${a}="${squash(v, 24)}"]`;
+        named = true;
+        break;
+      }
+    }
+    if (!named) {
+      for (const a of el.attributes) {
+        if (a.name.startsWith('data-') && !/^data-(state|side|align|orientation|headlessui|radix)/.test(a.name)) {
+          s += a.value && a.value.length < 20 ? `[${a.name}="${a.value}"]` : `[${a.name}]`;
+          named = true;
+          break;
+        }
+      }
+    }
+    if (!named && typeof el.className === 'string') {
+      const cls = el.className.split(/\s+/).filter((c) => c && !/[:[\]/!@%()]/.test(c)).slice(0, 2);
+      if (cls.length) s += '.' + cls.join('.');
+    }
+    const text = squash(el.textContent || '', 24);
+    if (text) s += ` "${text}"`;
+    return s;
+  }
+  const descOf = (tr) => tr.desc || (tr.desc = describe(tr.el));
+
+  // Only elements that draw something can visibly jump or pop. Transparent wrappers are
+  // left out, so their painted children report instead of every container around them.
+  const REPLACED = /^(img|svg|video|canvas|input|textarea|select|button|iframe|hr|progress|meter|picture|object|embed)$/;
+  const transparent = (c) => c === 'transparent' || /rgba?\([^)]*,\s*0\)$/.test(c) || /\/\s*0\)$/.test(c);
+  function paints(el, cs) {
+    if (REPLACED.test(el.localName) || ownText(el)) return true;
+    if (!transparent(cs.backgroundColor) || cs.backgroundImage !== 'none' || cs.boxShadow !== 'none') return true;
+    for (const side of ['Top', 'Right', 'Bottom', 'Left'])
+      if (cs[`border${side}Style`] !== 'none' && parseFloat(cs[`border${side}Width`]) > 0 && !transparent(cs[`border${side}Color`])) return true;
+    return cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) > 0;
+  }
+
+  // ---------- recording ----------
+
+  function resolveRoots(r) {
+    if (!r) return [document.body];
+    const list = Array.isArray(r) ? r : [r];
+    return list.flatMap((x) => (typeof x === 'string' ? [...document.querySelectorAll(x)] : [x])).filter(Boolean);
+  }
+
+  function env() {
+    const mm = (q) => (typeof matchMedia === 'function' ? matchMedia(q).matches : false);
+    return {
+      url: location.href,
+      viewport: `${innerWidth}x${innerHeight}@${devicePixelRatio}`,
+      reducedMotion: mm('(prefers-reduced-motion: reduce)'),
+      visibility: document.visibilityState,
+    };
+  }
+
+  const newPending = () => ({ added: [], removed: [], text: new Set() });
+
+  function start(userOpts) {
+    if (current) finish(current, 'restarted');
+    const o = userOpts || {};
+    const opts = { ...DEFAULTS, ...o, thresholds: { ...THRESHOLDS, ...(o.thresholds || {}) } };
+    const rec = {
+      opts,
+      t0: performance.now(),
+      frames: [],
+      tracks: new Map(),
+      trackOf: new WeakMap(),
+      scrollers: new Map(),
+      pending: newPending(),
+      mutations: [],
+      anims: new Map(),
+      ignored: new Set(),
+      roots: null,
+      extraRoots: [],
+      layoutShifts: [],
+      loafs: [],
+      overhead: [],
+      status: 'recording',
+      quiet: 0,
+      truncated: 0,
+      env: env(),
+      observers: [],
+    };
+    rec.done = new Promise((resolve) => (rec.resolve = resolve));
+    if (document.visibilityState !== 'visible') {
+      finish(rec, 'hidden');
+      return rec.done;
+    }
+    current = rec;
+    rec.mo = new MutationObserver((list) => onMutations(rec, list));
+    rec.mo.observe(document.documentElement || document, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+    observe(rec, 'layout-shift', (e) =>
+      rec.layoutShifts.push({
+        t: e.startTime - rec.t0,
+        value: e.value,
+        hadRecentInput: e.hadRecentInput,
+        sources: (e.sources || []).map((s) => ({
+          element: s.node && s.node.nodeType === 1 ? describe(s.node) : s.node ? '#text' : null,
+          dx: s.currentRect.x - s.previousRect.x,
+          dy: s.currentRect.y - s.previousRect.y,
+        })),
+      })
+    );
+    observe(rec, 'long-animation-frame', (e) =>
+      rec.loafs.push({
+        t: e.startTime - rec.t0,
+        duration: e.duration,
+        blocking: e.blockingDuration,
+        scripts: (e.scripts || [])
+          .slice()
+          .sort((a, b) => b.duration - a.duration)
+          .slice(0, 2)
+          .map((s) => ({
+            duration: Math.round(s.duration),
+            name: s.sourceFunctionName || s.invoker || '(anonymous)',
+            source: (s.sourceURL || '').split('/').pop().split('?')[0],
+          })),
+      })
+    );
+    rec.onHide = () => document.visibilityState !== 'visible' && finish(rec, 'hidden');
+    document.addEventListener('visibilitychange', rec.onHide);
+    if (document.body) {
+      setupRoots(rec, 0);
+      onFrame(rec, rec.t0, true);
+    }
+    rec.channel = new MessageChannel();
+    rec.channel.port1.onmessage = () => {
+      const ts = rec.pendingTs;
+      rec.pendingTs = null;
+      if (ts != null) onFrame(rec, ts, false);
+    };
+    const tick = (ts) => {
+      if (rec.status !== 'recording') return;
+      // Sample after this frame paints: a task posted from rAF runs once rendering is done.
+      rec.pendingTs = ts;
+      rec.channel.port2.postMessage(0);
+      rec.raf = requestAnimationFrame(tick);
+    };
+    rec.raf = requestAnimationFrame(tick);
+    rec.backstop = setTimeout(() => finish(rec, 'timeout'), opts.timeout + 1000);
+    return rec.done;
+  }
+
+  function observe(rec, type, fn) {
+    try {
+      if (!PerformanceObserver.supportedEntryTypes.includes(type)) return;
+      const po = new PerformanceObserver((list) => {
+        if (rec.status === 'recording') for (const e of list.getEntries()) if (e.startTime >= rec.t0) fn(e);
+      });
+      po.observe({ type, buffered: false });
+      rec.observers.push(po);
+    } catch (_) {
+      /* unsupported */
+    }
+  }
+
+  function setupRoots(rec, f) {
+    rec.roots = resolveRoots(rec.opts.root);
+    if (!rec.roots.length) {
+      rec.error = `root not found: ${rec.opts.root}`;
+      return;
+    }
+    for (const root of rec.roots) collect(rec, root, f);
+  }
+
+  function ignoredEl(rec, el) {
+    const sel = rec.opts.ignore;
+    if (sel && el.closest && el.closest(sel)) return true;
+    for (const t of rec.ignored) if (t.contains(el)) return true;
+    return false;
+  }
+
+  function collect(rec, root, f) {
+    if (root.nodeType !== 1 || SKIP_TAGS.has(root.tagName) || ignoredEl(rec, root)) return;
+    const sel = rec.opts.ignore;
+    if (!addTrack(rec, root, f)) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+      acceptNode(n) {
+        if (SKIP_TAGS.has(n.tagName)) return NodeFilter.FILTER_REJECT;
+        if (sel && n.matches(sel)) return NodeFilter.FILTER_REJECT;
+        if (n.namespaceURI === SVG_NS && n.localName !== 'svg') return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    let n;
+    while ((n = walker.nextNode())) if (!addTrack(rec, n, f)) break;
+  }
+
+  function addTrack(rec, el, f) {
+    if (rec.trackOf.has(el)) return true;
+    if (rec.tracks.size >= rec.opts.maxElements) {
+      rec.truncated++;
+      return false;
+    }
+    const tr = { id: idOf(el), el, born: f, died: null, rows: [], last: null, text: !!ownText(el), desc: null, skip: false };
+    for (const t of rec.ignored) if (t.contains(el)) tr.skip = true;
+    rec.tracks.set(tr.id, tr);
+    rec.trackOf.set(el, tr);
+    return true;
+  }
+
+  function inRoots(rec, el) {
+    for (const r of rec.roots) if (r.contains(el)) return true;
+    return false;
+  }
+
+  function onMutations(rec, list) {
+    if (rec.status !== 'recording') return;
+    const p = rec.pending;
+    for (const m of list) {
+      if (m.type === 'characterData') {
+        if (m.target.parentElement) p.text.add(m.target.parentElement);
+        continue;
+      }
+      for (const n of m.addedNodes) {
+        if (n.nodeType === 1) p.added.push(n);
+        else if (n.nodeType === 3 && m.target.nodeType === 1) p.text.add(m.target);
+      }
+      for (const n of m.removedNodes) if (n.nodeType === 1) p.removed.push(n);
+    }
+  }
+
+  function takeMutations(rec, f) {
+    const p = rec.pending;
+    rec.pending = newPending();
+    const added = [];
+    if (rec.roots && rec.roots.length) {
+      for (const el of p.added) {
+        if (!el.isConnected) continue;
+        const portal =
+          rec.opts.portals && el.parentElement === document.body && !rec.roots.includes(document.body);
+        if (!portal && !inRoots(rec, el)) continue;
+        if (portal) rec.roots.push(el);
+        if (!rec.trackOf.has(el)) added.push(el);
+        collect(rec, el, f);
+      }
+    }
+    const top = (els) => els.filter((el) => !els.some((o) => o !== el && o.contains(el)));
+    rec.mutations[f] = {
+      added: top(added),
+      // Removed and put back in the same frame: moved to a new place in the DOM.
+      moved: top(p.removed.filter((el) => el.isConnected)),
+      removed: top(p.removed.filter((el) => !el.isConnected)),
+      text: [...p.text],
+    };
+  }
+
+  function onFrame(rec, ts, baseline) {
+    if (rec.status !== 'recording') return;
+    if (!rec.roots) {
+      if (!document.body) return;
+      setupRoots(rec, rec.frames.length);
+    }
+    if (rec.error) return finish(rec, 'error');
+    const f = rec.frames.length;
+    rec.frames.push(baseline ? 0 : Math.max(0, ts - rec.t0));
+    takeMutations(rec, f);
+    const running = scanAnimations(rec, f);
+    const changed = sample(rec, f);
+    if (baseline) return;
+    rec.quiet = changed || running ? 0 : rec.quiet + 1;
+    const elapsed = performance.now() - rec.t0;
+    const w = rec.opts.waitFor;
+    const ready = !w || (typeof w === 'function' ? !!w() : !!document.querySelector(w));
+    if (elapsed >= rec.opts.timeout) finish(rec, 'timeout');
+    else if (ready && rec.quiet >= rec.opts.settleFrames && elapsed >= rec.opts.minDuration) finish(rec, 'settled');
+  }
+
+  function animProps(a) {
+    if (a.transitionProperty) return [a.transitionProperty];
+    const props = new Set();
+    try {
+      for (const k of a.effect.getKeyframes())
+        for (const p of Object.keys(k)) if (!/^(offset|computedOffset|easing|composite)$/.test(p)) props.add(p);
+    } catch (_) {
+      /* no keyframes */
+    }
+    return [...props];
+  }
+
+  function scanAnimations(rec, f) {
+    let running = false;
+    let list = [];
+    try {
+      list = document.getAnimations();
+    } catch (_) {
+      return false;
+    }
+    for (const a of list) {
+      let info = rec.anims.get(a);
+      if (!info) {
+        const target = a.effect && a.effect.target;
+        let timing = {};
+        try {
+          timing = a.effect.getComputedTiming();
+        } catch (_) {
+          /* none */
+        }
+        // Scroll-driven animations follow scroll, not time: they never "finish" and aren't motion to settle.
+        const scrollDriven = !!a.timeline && typeof DocumentTimeline !== 'undefined' && !(a.timeline instanceof DocumentTimeline);
+        const infinite = timing.iterations === Infinity || timing.endTime === Infinity;
+        info = { f, target, kind: a.constructor.name, props: animProps(a), duration: timing.duration, infinite, scrollDriven };
+        rec.anims.set(a, info);
+        if (infinite && target && target.nodeType === 1) {
+          rec.ignored.add(target);
+          for (const tr of rec.tracks.values()) if (target.contains(tr.el)) tr.skip = true;
+        }
+      }
+      if (!info.infinite && !info.scrollDriven && a.playState === 'running') {
+        const tr = info.target && rec.trackOf.get(info.target);
+        if (!tr || !tr.skip) running = true;
+      }
+    }
+    return running;
+  }
+
+  function sample(rec, f) {
+    const started = performance.now();
+    const vw = innerWidth;
+    const vh = innerHeight;
+    const view = { l: 0, t: 0, r: vw, b: vh };
+    const top = { o: 1, clip: view, sc: null, sr: null };
+    const memo = new Map();
+    const ctx = (el) => {
+      if (!el || el.nodeType !== 1) return top;
+      let c = memo.get(el);
+      if (c) return c;
+      const cs = styleOf(el);
+      const fixed = cs.position === 'fixed';
+      const p = ctx(el.parentElement);
+      let clip = fixed ? view : p.clip;
+      let sc = fixed ? null : p.sc;
+      let sr = fixed ? null : p.sr;
+      const o = p.o * (parseFloat(cs.opacity) || 0);
+      const ox = cs.overflowX;
+      const oy = cs.overflowY;
+      if ((ox !== 'visible' || oy !== 'visible') && el !== document.documentElement && el !== document.body) {
+        const r = el.getBoundingClientRect();
+        clip = {
+          l: ox === 'visible' ? clip.l : Math.max(clip.l, r.left),
+          r: ox === 'visible' ? clip.r : Math.min(clip.r, r.right),
+          t: oy === 'visible' ? clip.t : Math.max(clip.t, r.top),
+          b: oy === 'visible' ? clip.b : Math.min(clip.b, r.bottom),
+        };
+        const scrolls = (v) => v === 'auto' || v === 'scroll';
+        if ((scrolls(oy) && el.scrollHeight > el.clientHeight) || (scrolls(ox) && el.scrollWidth > el.clientWidth)) {
+          sc = el;
+          sr = r;
+          if (!rec.scrollers.has(el)) rec.scrollers.set(el, { el, rows: [], last: null, born: f });
+        }
+      }
+      c = { o, clip, sc, sr };
+      memo.set(el, c);
+      return c;
+    };
+
+    let changed = false;
+    for (const tr of rec.tracks.values()) {
+      if (tr.died !== null || tr.skip) continue;
+      const el = tr.el;
+      if (!el.isConnected) {
+        tr.died = f;
+        changed = true;
+        continue;
+      }
+      let row;
+      if (!el.getClientRects().length) {
+        row = [f, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0];
+      } else {
+        const b = el.getBoundingClientRect();
+        const cs = styleOf(el);
+        // Styles can land a frame or two after mount, so look again now and then.
+        if (!tr.paints && (tr.paints === undefined || f % 10 === 0)) tr.paints = paints(el, cs);
+        const fixed = cs.position === 'fixed';
+        const p = ctx(el.parentElement);
+        const o = p.o * (cs.visibility === 'hidden' ? 0 : parseFloat(cs.opacity) || 0);
+        const c = fixed ? view : p.clip;
+        const iw = Math.max(0, Math.min(b.right, c.r) - Math.max(b.left, c.l));
+        const ih = Math.max(0, Math.min(b.bottom, c.b) - Math.max(b.top, c.t));
+        let cx, cy;
+        if (fixed) {
+          cx = b.left;
+          cy = b.top;
+        } else if (p.sc) {
+          cx = b.left - p.sr.left + p.sc.scrollLeft;
+          cy = b.top - p.sr.top + p.sc.scrollTop;
+        } else {
+          cx = b.left + scrollX;
+          cy = b.top + scrollY;
+        }
+        let k = 1;
+        if (tr.text) {
+          const ow = el.offsetWidth;
+          const oh = el.offsetHeight;
+          if (ow > 0 && oh > 0 && b.height > 0) k = b.width / ow / (b.height / oh);
+        }
+        row = [f, b.left, b.top, cx, cy, b.width, b.height, o, iw * ih, k, 1];
+      }
+      const prev = tr.last;
+      if (!prev || differs(prev, row)) {
+        tr.rows.push(row);
+        tr.last = row;
+        if (prev || f > 0) changed = true;
+      }
+    }
+    const winRow = [f, scrollY, scrollX];
+    if (!rec.win) rec.win = { el: null, rows: [winRow], last: winRow, born: f };
+    else if (rec.win.last[1] !== winRow[1] || rec.win.last[2] !== winRow[2]) {
+      rec.win.rows.push(winRow);
+      rec.win.last = winRow;
+      changed = true;
+    }
+    for (const s of rec.scrollers.values()) {
+      if (!s.el.isConnected) continue;
+      const row = [f, s.el.scrollTop, s.el.scrollLeft];
+      if (!s.last || s.last[1] !== row[1] || s.last[2] !== row[2]) {
+        s.rows.push(row);
+        if (s.last) changed = true;
+        s.last = row;
+      }
+    }
+    rec.overhead.push(performance.now() - started);
+    return changed;
+  }
+
+  function differs(a, b) {
+    if (a[R] !== b[R]) return true;
+    for (let i = VX; i <= H; i++) if (Math.abs(a[i] - b[i]) > 0.01) return true;
+    return Math.abs(a[O] - b[O]) > 0.001 || Math.abs(a[A] - b[A]) > 0.5 || Math.abs(a[K] - b[K]) > 0.001;
+  }
+
+  function finish(rec, status) {
+    if (rec.status !== 'recording') return;
+    rec.status = status;
+    cancelAnimationFrame(rec.raf);
+    clearTimeout(rec.backstop);
+    if (rec.mo) rec.mo.disconnect();
+    for (const po of rec.observers) po.disconnect();
+    if (rec.onHide) document.removeEventListener('visibilitychange', rec.onHide);
+    if (rec.channel) rec.channel.port1.onmessage = null;
+    if (current === rec) current = null;
+    for (const tr of rec.tracks.values())
+      if (!tr.paints && tr.el.isConnected && tr.el.getClientRects().length) tr.paints = paints(tr.el, styleOf(tr.el));
+    try {
+      rec.result = analyze(rec);
+    } catch (e) {
+      rec.result = { version: VERSION, status: 'error', error: String((e && e.stack) || e), findings: [], expectations: [] };
+    }
+    last = rec;
+    rec.resolve(rec.result);
+  }
+
+  // ---------- analysis ----------
+
+  const median = (xs) => {
+    if (!xs.length) return 0;
+    const s = xs.slice().sort((a, b) => a - b);
+    const m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
+  const round = (n, d = 0) => {
+    const p = 10 ** d;
+    return Math.round(n * p) / p;
+  };
+  const sign = (n) => (n > 0 ? 1 : n < 0 ? -1 : 0);
+
+  // Per-frame values for one element (null where it isn't on the page or isn't rendered).
+  function series(rec, tr) {
+    const F = rec.frames.length;
+    const s = { vx: [], vy: [], cx: [], cy: [], w: [], h: [], o: [], a: [], k: [], alive: [], rendered: [] };
+    let ri = 0;
+    let cur = null;
+    for (let f = 0; f < F; f++) {
+      while (ri < tr.rows.length && tr.rows[ri][F_] <= f) cur = tr.rows[ri++];
+      const alive = !!cur && f >= tr.born && (tr.died === null || f < tr.died);
+      const on = alive && cur[R] === 1;
+      s.alive.push(alive);
+      s.rendered.push(on);
+      s.vx.push(on ? cur[VX] : null);
+      s.vy.push(on ? cur[VY] : null);
+      s.cx.push(on ? cur[CX] : null);
+      s.cy.push(on ? cur[CY] : null);
+      s.w.push(on ? cur[W] : null);
+      s.h.push(on ? cur[H] : null);
+      s.o.push(on ? cur[O] : 0);
+      s.a.push(on ? cur[A] : 0);
+      s.k.push(on ? cur[K] : 1);
+    }
+    return s;
+  }
+
+  const pathLength = (xs) => {
+    let p = 0;
+    for (let i = 1; i < xs.length; i++) if (xs[i] != null && xs[i - 1] != null) p += Math.abs(xs[i] - xs[i - 1]);
+    return p;
+  };
+
+  // Movement events along one axis. Each event: { type, f, amount, ... }.
+  function axisEvents(xs, T) {
+    const out = [];
+    const F = xs.length;
+    let f = 0;
+    while (f < F) {
+      if (xs[f] == null) {
+        f++;
+        continue;
+      }
+      let g = f;
+      while (g + 1 < F && xs[g + 1] != null) g++;
+      segmentEvents(xs, f, g, T, out);
+      f = g + 1;
+    }
+    return out;
+  }
+
+  function segmentEvents(xs, a, b, T, out) {
+    const d = (i) => xs[i] - xs[i - 1];
+    const used = new Set();
+    // Shiver: the direction flips on consecutive frames, as when two things fight over a value.
+    for (let i = a + 1; i <= b; ) {
+      let j = i;
+      while (
+        j + 1 <= b &&
+        Math.abs(d(j)) >= 2 * T.eps &&
+        Math.abs(d(j + 1)) >= 2 * T.eps &&
+        sign(d(j + 1)) === -sign(d(j))
+      )
+        j++;
+      if (j - i >= 3) {
+        let amp = 0;
+        for (let k = i; k <= j; k++) amp = Math.max(amp, Math.abs(d(k)));
+        out.push({ type: 'oscillation', f: i, amount: amp, count: j - i + 1 });
+        for (let k = i; k <= j; k++) used.add(k);
+        i = j + 1;
+      } else i++;
+    }
+    // Blips: off by a clear amount, then back where it was within a few frames.
+    for (let i = a + 1; i <= b; i++) {
+      const di = d(i);
+      if (Math.abs(di) < Math.max(T.shift, 4) || used.has(i)) continue;
+      const base = xs[i - 1];
+      for (let j = i + 1; j <= Math.min(b, i + T.blipFrames); j++) {
+        if (Math.abs(xs[j] - base) <= Math.max(1, 0.2 * Math.abs(di))) {
+          let away = true;
+          for (let k = i; k < j; k++) if (Math.abs(xs[k] - base) < 0.5 * Math.abs(di)) away = false;
+          if (away) {
+            out.push({ type: 'blip', f: i, amount: di, frames: j - i });
+            for (let k = i; k <= j; k++) used.add(k);
+          }
+          break;
+        }
+      }
+    }
+    // Runs of consecutive moving frames.
+    const runs = [];
+    let run = null;
+    for (let i = a + 1; i <= b; i++) {
+      const moving = !used.has(i) && Math.abs(d(i)) > T.eps;
+      if (moving) {
+        if (run && run.q === i - 1) run.q = i;
+        else runs.push((run = { p: i, q: i }));
+      }
+    }
+    for (let ri = 0; ri < runs.length; ri++) {
+      const r = runs[ri];
+      const prev = runs[ri - 1];
+      const next = runs[ri + 1];
+      const len = r.q - r.p + 1;
+      const travel = xs[r.q] - xs[r.p - 1];
+      if (prev && r.p - prev.q - 1 >= T.restFrames && Math.abs(travel) >= 1 && (len > 1 || Math.abs(travel) < T.shift)) {
+        out.push({ type: 'resettle', f: r.p, amount: travel, rest: r.p - prev.q - 1 });
+      }
+      if (len === 1) {
+        const di = d(r.p);
+        if (Math.abs(di) < T.shift) continue;
+        // A one-frame move right after a move ends (or right before one starts) belongs to it.
+        if (prev && prev.q > prev.p && r.p - prev.q - 1 <= 3)
+          out.push({ type: 'jump', f: r.p, amount: di, where: 'end', travel: xs[r.p] - xs[prev.p - 1], perFrame: Math.abs(d(prev.q)) });
+        else if (next && next.q > next.p && next.p - r.q - 1 <= 2)
+          out.push({ type: 'jump', f: r.p, amount: di, where: 'start', travel: xs[next.q] - xs[r.p - 1], perFrame: Math.abs(d(next.p)) });
+        else out.push({ type: 'shift', f: r.p, amount: di });
+        continue;
+      }
+      let jumpAt = -1;
+      for (let i = r.p; i <= r.q; i++) {
+        const di = Math.abs(d(i));
+        // Compared with its neighbours, so a fast middle of an eased move isn't a jump.
+        const near = [];
+        for (const k of [i - 2, i - 1, i + 1, i + 2]) if (k >= r.p && k <= r.q) near.push(Math.abs(d(k)));
+        const m = median(near);
+        if (near.length && di >= T.jumpMin && di >= T.jumpRatio * Math.max(m, T.eps)) {
+          out.push({ type: 'jump', f: i, amount: d(i), where: i === r.p ? 'start' : i === r.q ? 'end' : 'mid', travel, perFrame: m });
+          jumpAt = i;
+        }
+      }
+      // Direction changes.
+      const dir = sign(travel) || sign(d(r.p));
+      const turns = [];
+      let lastSign = 0;
+      for (let i = r.p; i <= r.q; i++) {
+        const s = sign(d(i));
+        if (Math.abs(d(i)) <= T.eps * 0.5) continue;
+        if (lastSign && s !== lastSign) turns.push(i);
+        lastSign = s;
+      }
+      if (turns.length && Math.abs(travel) >= T.shift && !(jumpAt === r.p && turns[0] === r.p + 1)) {
+        const t0 = turns[0];
+        const progress = (xs[t0 - 1] - xs[r.p - 1]) / travel;
+        if (progress < T.reversalBefore && progress > -0.5) {
+          let back = 0;
+          for (let i = t0; i <= r.q && sign(d(i)) !== dir; i++) back += Math.abs(d(i));
+          if (back >= 1) out.push({ type: 'reversal', f: t0, amount: back, progress, travel });
+        }
+      }
+      if (turns.length >= 3) {
+        const amps = [];
+        let ext = xs[r.p - 1];
+        for (const t of turns) {
+          amps.push(Math.abs(xs[t - 1] - ext));
+          ext = xs[t - 1];
+        }
+        const tail = amps.slice(1);
+        const decaying = tail.every((v, i) => v <= amps[i] * 0.8);
+        if (!decaying && Math.max(...tail) >= 2) out.push({ type: 'oscillation', f: turns[0], amount: Math.max(...tail), count: turns.length });
+      }
+      if (Math.abs(travel) >= T.shift) {
+        let over = 0;
+        let at = r.p;
+        for (let i = r.p; i <= r.q; i++) {
+          const v = (xs[i] - xs[r.q]) * dir;
+          if (v > over) {
+            over = v;
+            at = i;
+          }
+        }
+        if (over > Math.max(T.overshootMin, T.overshoot * Math.abs(travel))) out.push({ type: 'overshoot', f: at, amount: over, travel });
+      }
+    }
+  }
+
+  function presenceEvents(s, f0, T, scrolled) {
+    const out = [];
+    const F = s.o.length;
+    const vis = s.o.map((o, f) => s.rendered[f] && s.a[f] > 0 && o >= 0.05);
+    const hiddenBy = (f) => (!s.alive[f] ? 'gone' : !s.rendered[f] ? 'unrendered' : s.o[f] < 0.05 ? 'transparent' : 'clipped');
+    const skip = new Set(); // the return half of a flicker
+    for (let f = Math.max(1, f0); f < F; f++) {
+      if (skip.has(f)) continue;
+      if (vis[f] && !vis[f - 1]) {
+        const why = hiddenBy(f - 1);
+        // Something that became visible by scrolling or a growing clip is not a pop.
+        if (why === 'clipped' && (scrolled[f] || s.a[f] < 0.5 * Math.max(...s.a.slice(f, f + 10)))) continue;
+        let end = f;
+        while (end + 1 < F && vis[end + 1]) end++;
+        const shown = end - f + 1;
+        if (end < F - 1 && shown <= 2 && s.o[f] >= 0.3) {
+          out.push({ type: 'flash', f, frames: shown, area: s.a[f] });
+          skip.add(end + 1); // its disappearance is part of the flash
+          continue;
+        }
+        const maxA = Math.max(...s.a.slice(f, Math.min(F, f + 10)));
+        if (s.o[f] >= 0.9 && s.a[f] >= T.popArea && s.a[f] >= 0.5 * maxA)
+          out.push({ type: 'pop-in', f, area: s.a[f], w: s.w[f], h: s.h[f], why });
+      } else if (!vis[f] && vis[f - 1]) {
+        const why = hiddenBy(f);
+        if (why === 'clipped' && scrolled[f]) continue;
+        // Back within a few frames: a flicker, not a removal.
+        let back = -1;
+        for (let j = f + 1; j <= Math.min(F - 1, f + T.blipFrames - 1); j++) if (vis[j]) {
+          back = j;
+          break;
+        }
+        if (back > 0 && s.o[f - 1] >= 0.5) {
+          out.push({ type: 'flicker', f, frames: back - f, from: s.o[f - 1], to: 0 });
+          skip.add(back);
+          continue;
+        }
+        if (s.o[f - 1] >= 0.9 && s.a[f - 1] >= T.popArea)
+          out.push({ type: 'pop-out', f, area: s.a[f - 1], w: s.w[f - 1], h: s.h[f - 1], why });
+      } else if (vis[f] && vis[f - 1]) {
+        const dOp = s.o[f] - s.o[f - 1];
+        if (Math.abs(dOp) >= T.flicker) {
+          let back = -1;
+          for (let j = f + 1; j <= Math.min(F - 1, f + T.blipFrames - 1); j++)
+            if (Math.abs(s.o[j] - s.o[f - 1]) <= 0.1) {
+              back = j;
+              break;
+            }
+          if (back > 0) {
+            out.push({ type: 'flicker', f, frames: back - f, from: s.o[f - 1], to: s.o[f] });
+            skip.add(back);
+          } else if (Math.abs(dOp) >= 0.5) out.push({ type: 'opacity-snap', f, from: s.o[f - 1], to: s.o[f] });
+        }
+      }
+    }
+    return out;
+  }
+
+  function stretchEvents(s, T) {
+    const out = [];
+    const F = s.k.length;
+    let endK = 1;
+    for (let f = F - 1; f >= 0; f--) if (s.rendered[f]) {
+      endK = s.k[f];
+      break;
+    }
+    let runStart = -1;
+    let worst = 0;
+    for (let f = 0; f <= F; f++) {
+      const dev = f < F && s.rendered[f] && s.a[f] > 0 ? Math.abs(s.k[f] - endK) : 0;
+      if (dev > T.stretch) {
+        if (runStart < 0) runStart = f;
+        worst = Math.max(worst, dev);
+      } else if (runStart >= 0) {
+        if (f - runStart >= 2) out.push({ type: 'stretch', f: runStart, frames: f - runStart, amount: worst });
+        runStart = -1;
+        worst = 0;
+      }
+    }
+    return out;
+  }
+
+  function analyze(rec) {
+    const T = rec.opts.thresholds;
+    const F = rec.frames.length;
+    const findings = [];
+    const tracks = [...rec.tracks.values()].filter((t) => !t.skip);
+    const scrolled = new Array(F).fill(false);
+    const scrollSources = [...rec.scrollers.values()];
+    if (rec.win) scrollSources.push(rec.win);
+    for (const sc of scrollSources) for (let i = 1; i < sc.rows.length; i++) scrolled[sc.rows[i][0]] = true;
+
+    const S = new Map();
+    const sizeChanged = new Array(F).fill(null).map(() => []);
+    for (const tr of tracks) {
+      const s = series(rec, tr);
+      S.set(tr, s);
+      for (let f = 1; f < F; f++)
+        if (s.h[f] != null && s.h[f - 1] != null && (Math.abs(s.h[f] - s.h[f - 1]) >= 1 || Math.abs(s.w[f] - s.w[f - 1]) >= 1))
+          sizeChanged[f].push(tr);
+    }
+
+    const visibleAt = (s, f) => s.a[f] > 0 || (f > 0 && s.a[f - 1] > 0);
+    for (const tr of tracks) {
+      const moved = tr.rows.length > 1 || tr.born > 0 || tr.died !== null;
+      if (!moved || !tr.paints) continue;
+      const s = S.get(tr);
+      if (!s.a.some((a) => a > 0)) continue; // never on screen
+      const add = (e, axis) => findings.push({ ...e, axis, tr });
+      for (const axis of ['x', 'y']) {
+        const v = axis === 'x' ? s.vx : s.vy;
+        const c = axis === 'x' ? s.cx : s.cy;
+        const xs = pathLength(c) <= pathLength(v) ? c : v;
+        for (const e of axisEvents(xs, T)) if (visibleAt(s, e.f)) add(e, axis);
+      }
+      for (const e of presenceEvents(s, tr.born === 0 ? 1 : tr.born + 1 > 1 ? tr.born : 1, T, scrolled)) {
+        // Elements present in the first frame they were tracked (page load) are the baseline.
+        if ((e.type === 'pop-in' || e.type === 'flash') && e.f === tr.born && tr.born === firstFrameOf(rec)) continue;
+        add(e, null);
+      }
+      if (tr.text) for (const e of stretchEvents(s, T)) add(e, null);
+    }
+
+    for (const sc of scrollSources) {
+      const F2 = F;
+      const ys = new Array(F2).fill(null);
+      let ri = 0;
+      let cur = null;
+      for (let f = sc.born; f < F2; f++) {
+        while (ri < sc.rows.length && sc.rows[ri][0] <= f) cur = sc.rows[ri++];
+        ys[f] = cur ? cur[1] : null;
+      }
+      for (const e of axisEvents(ys, { ...T, shift: T.scrollJump, jumpMin: T.scrollJump, blipFrames: T.blipFrames })) {
+        const name = sc.el ? describe(sc.el) : 'window';
+        if (e.type === 'shift' || e.type === 'jump' || e.type === 'blip')
+          findings.push({ type: 'scroll-jump', f: e.f, amount: e.amount, scroller: name });
+        else if (e.type === 'oscillation' || (e.type === 'reversal' && e.amount >= 4))
+          findings.push({ type: 'scroll-fight', f: e.f, amount: e.amount, count: e.count || 1, scroller: name });
+      }
+    }
+
+    // Swaps: one element pops out while another of a similar size pops in at the same place.
+    // Matching isn't one-to-one: nested old elements can all be replaced by one new element.
+    const pops = findings.filter((x) => x.type === 'pop-in');
+    const reported = new Set();
+    for (const out of findings.filter((x) => x.type === 'pop-out')) {
+      const ro = boxAt(S.get(out.tr), out.f - 1);
+      if (!ro) continue;
+      let best = null;
+      let seamless = false;
+      for (const inn of pops) {
+        if (Math.abs(inn.f - out.f) > 2) continue;
+        const ri = boxAt(S.get(inn.tr), inn.f);
+        if (!ri || overlap(ro, ri) < 0.5 || Math.abs(ri.w * ri.h - ro.w * ro.h) > 0.3 * Math.max(ri.w * ri.h, ro.w * ro.h)) continue;
+        inn.swapped = out.swapped = true;
+        // Same box, tag and text: most likely a seamless handoff between two copies.
+        const lookAlike =
+          Math.abs(ri.x - ro.x) <= 2 && Math.abs(ri.y - ro.y) <= 2 && Math.abs(ri.w - ro.w) <= 2 && Math.abs(ri.h - ro.h) <= 2 &&
+          inn.tr.el.localName === out.tr.el.localName &&
+          (inn.tr.el.textContent || '').trim() === (out.tr.el.textContent || '').trim();
+        if (lookAlike) seamless = true;
+        else if (!best || overlap(ro, ri) > best.score) best = { inn, score: overlap(ro, ri) };
+      }
+      if (!seamless && best && !reported.has(best.inn)) {
+        reported.add(best.inn);
+        findings.push({ type: 'swap', f: best.inn.f, from: descOf(out.tr), tr: best.inn.tr });
+      }
+    }
+
+    const slow = rec.loafs.filter((l) => l.duration >= T.slowFrame);
+    if (slow.length) {
+      const worst = slow.reduce((a, b) => (b.duration > a.duration ? b : a));
+      findings.push({
+        type: 'slow-frame',
+        f: frameAt(rec, worst.t),
+        amount: worst.duration,
+        count: slow.length,
+        script: worst.scripts[0] ? `${worst.scripts[0].name}${worst.scripts[0].source ? ' (' + worst.scripts[0].source + ')' : ''}` : '',
+      });
+    }
+
+    const seenAnim = new Set();
+    for (const info of rec.anims.values()) {
+      if (info.infinite || info.scrollDriven || !info.target || info.target.nodeType !== 1) continue;
+      const layout = info.props.map((p) => p.replace(/-([a-z])/g, (_, ch) => ch.toUpperCase())).filter((p) => LAYOUT_PROP.test(p));
+      if (!layout.length) continue;
+      const key = idOf(info.target) + layout.join();
+      if (seenAnim.has(key)) continue;
+      seenAnim.add(key);
+      findings.push({ type: 'layout-anim', f: info.f, props: layout, el: info.target });
+    }
+
+    const out = finalize(rec, findings.filter((x) => !(x.swapped && (x.type === 'pop-in' || x.type === 'pop-out'))), S, sizeChanged, T);
+    const result = {
+      version: VERSION,
+      status: rec.status,
+      error: rec.error,
+      duration: Math.round(rec.frames[F - 1] || 0),
+      frames: F,
+      elements: rec.tracks.size,
+      truncated: rec.truncated,
+      probeMs: {
+        avg: round(rec.overhead.reduce((a, b) => a + b, 0) / Math.max(1, rec.overhead.length), 2),
+        max: round(Math.max(0, ...rec.overhead), 2),
+      },
+      env: rec.env,
+      findings: out,
+      counts: { high: 0, medium: 0, low: 0 },
+      expectations: rec.opts.expect ? check(rec, rec.opts.expect, S) : [],
+      layoutShifts: rec.layoutShifts.map((l) => ({ ...l, t: Math.round(l.t), value: round(l.value, 4) })),
+      slowFrames: rec.loafs.map((l) => ({ ...l, t: Math.round(l.t), duration: Math.round(l.duration) })),
+      animations: [...rec.anims.values()]
+        .filter((i) => i.target && i.target.nodeType === 1)
+        .slice(0, 50)
+        .map((i) => ({ element: describe(i.target), kind: i.kind, props: i.props, duration: i.duration, infinite: i.infinite, t: Math.round(rec.frames[i.f] || 0) })),
+    };
+    for (const x of out) result.counts[x.severity]++;
+    if (rec.status === 'timeout') {
+      const tail = F - Math.min(F, rec.opts.settleFrames);
+      const busy = tracks.filter((t) => t.paints && t.rows.length > 1 && t.rows[t.rows.length - 1][F_] >= tail);
+      result.stillChanging = busy
+        .filter((t) => !busy.some((o) => o !== t && o.el.contains(t.el)))
+        .slice(0, 5)
+        .map(descOf);
+      for (const [anim, a] of rec.anims)
+        if (anim.playState === 'running' && !a.infinite && !a.scrollDriven && a.target && a.target.nodeType === 1) {
+          const name = `${describe(a.target)} (running ${a.kind})`;
+          if (!result.stillChanging.includes(name) && result.stillChanging.length < 8) result.stillChanging.push(name);
+        }
+    }
+    return result;
+  }
+
+  const firstFrameOf = (rec) => {
+    let min = Infinity;
+    for (const tr of rec.tracks.values()) min = Math.min(min, tr.born);
+    return min === Infinity ? 0 : min;
+  };
+  const frameAt = (rec, t) => {
+    let f = 0;
+    while (f + 1 < rec.frames.length && rec.frames[f + 1] <= t) f++;
+    return f;
+  };
+  const boxAt = (s, f) => (s && f >= 0 && s.w[f] != null ? { x: s.vx[f], y: s.vy[f], w: s.w[f], h: s.h[f] } : null);
+  function overlap(a, b) {
+    const iw = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+    const ih = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+    const m = Math.min(a.w * a.h, b.w * b.h);
+    return m > 0 ? (iw * ih) / m : 0;
+  }
+
+  function severity(x, T) {
+    const n = Math.abs(x.amount || 0);
+    switch (x.type) {
+      case 'blip':
+      case 'flash':
+      case 'flicker':
+      case 'oscillation':
+      case 'scroll-fight':
+        return 'high';
+      case 'shift':
+        return n >= T.bigShift ? 'high' : 'medium';
+      case 'jump':
+        return n >= T.bigJump ? 'high' : 'medium';
+      case 'opacity-snap':
+        return Math.min(x.from, x.to) >= 0.3 ? 'low' : 'medium';
+      case 'reversal':
+      case 'stretch':
+      case 'scroll-jump':
+      case 'swap':
+        return 'medium';
+      case 'pop-in':
+      case 'pop-out':
+        return x.area >= T.bigArea ? 'medium' : 'low';
+      case 'resettle':
+        return n >= 4 ? 'medium' : 'low';
+      case 'slow-frame':
+        return n >= 100 ? 'medium' : 'low';
+      default:
+        return 'low';
+    }
+  }
+
+  const dirWord = (axis, n) => (axis === 'y' ? (n > 0 ? 'down' : 'up') : n > 0 ? 'right' : 'left');
+  const px = (n) => `${round(Math.abs(n), Math.abs(n) < 10 ? 1 : 0)}px`;
+  const pct = (n) => `${Math.round(n * 100)}%`;
+
+  function message(x) {
+    const n = x.amount;
+    switch (x.type) {
+      case 'shift':
+        return `moved ${dirWord(x.axis, n)} ${px(n)} in one frame, with no transition`;
+      case 'blip':
+        return `was ${px(n)} ${dirWord(x.axis, n)} of its place for ${x.frames} frame${x.frames > 1 ? 's' : ''}, then snapped back`;
+      case 'jump':
+        if (x.where === 'start') return `jumped ${px(n)} on its first moving frame, then animated (wrong starting frame?)`;
+        if (x.where === 'end') return `snapped ${px(n)} at the end of its move (moving ~${px(x.perFrame)}/frame before)`;
+        return `jumped ${px(n)} in one frame mid-move (moving ~${px(x.perFrame)}/frame)`;
+      case 'reversal':
+        return `turned back ${px(n)} after ${pct(x.progress)} of a ${px(x.travel)} move`;
+      case 'oscillation':
+        return `went back and forth ${x.count} times (±${px(n)}) without settling`;
+      case 'overshoot':
+        return `overshot ${px(n)} past the end of a ${px(x.travel)} move`;
+      case 'resettle':
+        return `moved again ${px(n)} after resting ${x.rest} frames`;
+      case 'stretch':
+        return `text stretched ${pct(x.amount)} out of proportion for ${x.frames} frames (scaleX ≠ scaleY)`;
+      case 'pop-in':
+        return `appeared at full opacity with no fade (${Math.round(x.w)}×${Math.round(x.h)})`;
+      case 'pop-out':
+        return `disappeared at full opacity with no fade (${Math.round(x.w)}×${Math.round(x.h)})`;
+      case 'flash':
+        return `was visible for only ${x.frames} frame${x.frames > 1 ? 's' : ''}`;
+      case 'flicker':
+        return x.to === 0
+          ? `vanished for ${x.frames} frame${x.frames > 1 ? 's' : ''}, then came back`
+          : `opacity flickered ${round(x.from, 2)} → ${round(x.to, 2)} and back within ${x.frames} frame${x.frames > 1 ? 's' : ''}`;
+      case 'opacity-snap':
+        return `opacity jumped ${round(x.from, 2)} → ${round(x.to, 2)} in one frame`;
+      case 'swap':
+        return `replaced ${x.from} in place with no crossfade`;
+      case 'scroll-jump':
+        return `scroll jumped ${px(n)} ${n > 0 ? 'down' : 'up'} in one frame`;
+      case 'scroll-fight':
+        return `scroll changed direction ${x.count} time${x.count > 1 ? 's' : ''} (±${px(n)}): two things scrolling it?`;
+      case 'slow-frame':
+        return `${x.count} slow frame${x.count > 1 ? 's' : ''}, longest ${Math.round(n)}ms${x.script ? ' in ' + x.script : ''}`;
+      case 'layout-anim':
+        return `animates ${x.props.join(', ')}, which runs layout every frame`;
+      default:
+        return x.type;
+    }
+  }
+
+  // What changed in the frame that pushed things: inserted, removed or resized elements.
+  function causeAt(rec, f, S, sizeChanged, exclude) {
+    const m = rec.mutations[f] || { added: [], moved: [], removed: [], text: [] };
+    const added = m.added.map((el) => rec.trackOf.get(el)).filter(Boolean);
+    if (added.length) {
+      const tr = added[0];
+      const s = S.get(tr);
+      const h = s && s.h[f] != null ? ` (${Math.round(s.w[f])}×${Math.round(s.h[f])})` : '';
+      return `${descOf(tr)} inserted${h}${added.length > 1 ? ` +${added.length - 1} more` : ''}`;
+    }
+    const removed = m.removed.map((el) => rec.trackOf.get(el)).filter(Boolean);
+    if (removed.length) return `${descOf(removed[0])} removed`;
+    const moved = m.moved.map((el) => rec.trackOf.get(el)).filter(Boolean);
+    if (moved.length) return `${descOf(moved[0])} moved to a new parent`;
+    const changed = sizeChanged[f].filter((t) => !exclude.has(t));
+    const deepest = changed.filter((t) => !changed.some((o) => o !== t && t.el.contains(o.el)));
+    if (deepest.length) {
+      const tr = deepest[0];
+      const s = S.get(tr);
+      const dh = s.h[f] - s.h[f - 1];
+      const dw = s.w[f] - s.w[f - 1];
+      const textChanged = m.text.some((el) => tr.el.contains(el));
+      const what = Math.abs(dh) >= Math.abs(dw) ? `${dh > 0 ? 'grew' : 'shrank'} ${px(dh)} taller` : `${dw > 0 ? 'grew' : 'shrank'} ${px(dw)} wider`;
+      return `${descOf(tr)} ${what}${textChanged ? ' (text changed)' : ''}`;
+    }
+    return '';
+  }
+
+  function finalize(rec, raw, S, sizeChanged, T) {
+    // Keep the outermost element when nested elements report the same thing in the same frame.
+    const sameThing = (a, b) =>
+      a.type === b.type && a.f === b.f && a.axis === b.axis && Math.abs((a.amount || 0) - (b.amount || 0)) <= 1;
+    const kept = raw.filter(
+      (x) => !x.tr || !raw.some((o) => o !== x && o.tr && o.tr !== x.tr && o.tr.el.contains(x.tr.el) && sameThing(o, x))
+    );
+    // Merge siblings doing the same thing at once ("li ×14 moved down 12px").
+    const groups = new Map();
+    let solo = 0;
+    for (const x of kept) {
+      const key = x.tr ? `${x.type}|${x.f}|${x.axis}|${Math.round(x.amount || 0)}` : `solo${solo++}`;
+      const g = groups.get(key);
+      if (g) g.count++;
+      else groups.set(key, { ...x, count: x.count && !x.tr ? x.count : 1, merged: 1 });
+    }
+    const list = [...groups.values()].map((x) => {
+      const sev = severity(x, T);
+      const t = Math.round(rec.frames[x.f] || 0);
+      let element = x.tr ? descOf(x.tr) : x.el ? describe(x.el) : x.scroller || '';
+      if (x.tr && x.count > 1 && x.type !== 'slow-frame' && x.type !== 'scroll-fight') element += ` ×${x.count}`;
+      const moving = new Set(kept.filter((k) => k.f === x.f && k.tr).map((k) => k.tr));
+      const cause = x.type === 'shift' || x.type === 'blip' ? causeAt(rec, x.f, S, sizeChanged, moving) : '';
+      return {
+        severity: sev,
+        type: x.type,
+        t,
+        frame: x.f,
+        element,
+        message: message(x),
+        cause,
+        amount: x.amount != null ? round(x.amount, 1) : undefined,
+      };
+    });
+    list.sort((a, b) => SEV[b.severity] - SEV[a.severity] || a.t - b.t);
+    return list;
+  }
+
+  // ---------- expectations ----------
+
+  function matching(rec, sel) {
+    const out = [];
+    for (const tr of rec.tracks.values()) {
+      try {
+        if (tr.el.matches(sel)) out.push(tr);
+      } catch (_) {
+        return [];
+      }
+    }
+    return out.filter((t) => !out.some((o) => o !== t && o.el.contains(t.el)));
+  }
+  const firstLast = (xs) => {
+    let a = null;
+    let b = null;
+    for (const v of xs) if (v != null) {
+      if (a === null) a = v;
+      b = v;
+    }
+    return [a, b];
+  };
+
+  // Per-frame values for "whatever matches sel": when a framework remounts an element, the
+  // expectation follows the copy that is on screen (the newest one when both are).
+  function follow(rec, sel, get) {
+    const all = [];
+    for (const tr of rec.tracks.values()) {
+      try {
+        if (tr.el.matches(sel)) all.push(tr);
+      } catch (_) {
+        return null;
+      }
+    }
+    const trs = all.filter((t) => !all.some((o) => o !== t && o.el.contains(t.el))).sort((a, b) => b.born - a.born);
+    if (!trs.length) return null;
+    const F = rec.frames.length;
+    const out = { vx: [], vy: [], o: [], a: [], rendered: [], trs };
+    const ss = trs.map(get);
+    for (let f = 0; f < F; f++) {
+      let k = ss.findIndex((s) => s.rendered[f] && s.o[f] >= 0.05 && s.a[f] > 0);
+      if (k < 0) k = ss.findIndex((s) => s.rendered[f]);
+      const s = k >= 0 ? ss[k] : null;
+      out.vx.push(s ? s.vx[f] : null);
+      out.vy.push(s ? s.vy[f] : null);
+      out.o.push(s ? s.o[f] : 0);
+      out.a.push(s ? s.a[f] : 0);
+      out.rendered.push(!!s);
+    }
+    return out;
+  }
+
+  function check(rec, spec, S) {
+    S = S || new Map();
+    const get = (tr) => S.get(tr) || (S.set(tr, series(rec, tr)), S.get(tr));
+    const out = [];
+    const claimed = [];
+    const tol = spec.tolerance != null ? spec.tolerance : 2;
+    for (const [sel, want] of Object.entries(spec.moves || {})) {
+      const s = follow(rec, sel, get);
+      if (!s) {
+        out.push({ name: `moves ${sel}`, pass: false, detail: 'no element matched' });
+        continue;
+      }
+      claimed.push(...s.trs);
+      const [x0, x1] = firstLast(s.vx);
+      const [y0, y1] = firstLast(s.vy);
+      const got = { dx: round(x1 - x0, 1), dy: round(y1 - y0, 1) };
+      const t2 = want.tolerance != null ? want.tolerance : tol;
+      const pass = ['dx', 'dy'].every((k) => want[k] == null || Math.abs(got[k] - want[k]) <= t2);
+      out.push({ name: `moves ${sel}`, pass, detail: `dx ${got.dx}, dy ${got.dy} (wanted ${want.dx != null ? 'dx ' + want.dx + ' ' : ''}${want.dy != null ? 'dy ' + want.dy : ''} ±${t2})` });
+    }
+    const fade = (sels, dir) => {
+      for (const sel of [].concat(sels || [])) {
+        const s = follow(rec, sel, get);
+        if (!s) {
+          out.push({ name: `${dir} ${sel}`, pass: false, detail: 'no element matched' });
+          continue;
+        }
+        claimed.push(...s.trs);
+        const vis = s.o.map((o, f) => s.rendered[f] && o >= 0.05 && s.a[f] > 0);
+        const first = vis.indexOf(true);
+        const lastF = vis.lastIndexOf(true);
+        let pass;
+        let detail;
+        if (first < 0) {
+          pass = false;
+          detail = 'never visible';
+        } else if (dir === 'fadesIn') {
+          pass = s.o[first] < 0.5 && s.o[lastF] >= 0.9;
+          detail = `opacity ${round(s.o[first], 2)} on its first visible frame, ${round(s.o[lastF], 2)} at the end`;
+        } else {
+          pass = s.o[lastF] < 0.5;
+          detail = `opacity ${round(s.o[lastF], 2)} on its last visible frame`;
+        }
+        out.push({ name: `${dir} ${sel}`, pass, detail });
+      }
+    };
+    fade(spec.fadesIn, 'fadesIn');
+    fade(spec.fadesOut, 'fadesOut');
+    if (spec.still) {
+      const max = spec.maxShift != null ? spec.maxShift : 1;
+      let trs;
+      if (spec.still === 'others') {
+        trs = [...rec.tracks.values()].filter(
+          (t) =>
+            !t.skip &&
+            t.paints &&
+            t.born === firstFrameOf(rec) &&
+            t.died === null &&
+            !claimed.some((c) => c.el.contains(t.el) || t.el.contains(c.el))
+        );
+      } else {
+        trs = [].concat(spec.still).flatMap((sel) => matching(rec, sel));
+      }
+      const movers = [];
+      for (const tr of trs) {
+        if (tr.rows.length < 2) continue;
+        const s = get(tr);
+        if (!s.a.some((a) => a > 0)) continue;
+        let worst = 0;
+        for (const axis of ['x', 'y']) {
+          const v = axis === 'x' ? s.vx : s.vy;
+          const c = axis === 'x' ? s.cx : s.cy;
+          const xs = pathLength(c) <= pathLength(v) ? c : v;
+          const [x0] = firstLast(xs);
+          for (const val of xs) if (val != null) worst = Math.max(worst, Math.abs(val - x0));
+        }
+        if (worst > max) movers.push({ tr, worst });
+      }
+      const top = movers.filter((m) => !movers.some((o) => o !== m && o.tr.el.contains(m.tr.el)));
+      out.push({
+        name: `still ${spec.still === 'others' ? 'others' : [].concat(spec.still).join(', ')}`,
+        pass: top.length === 0,
+        detail: top.length
+          ? `${top.length} moved more than ${max}px: ` + top.slice(0, 3).map((m) => `${descOf(m.tr)} ${px(m.worst)}`).join('; ')
+          : `nothing moved more than ${max}px`,
+      });
+    }
+    if (spec.noFindings) {
+      const floor = SEV[spec.noFindings] || 2;
+      const bad = (rec.result ? rec.result.findings : []).filter((x) => SEV[x.severity] >= floor);
+      out.push({ name: `no ${spec.noFindings}+ findings`, pass: bad.length === 0, detail: bad.length ? `${bad.length} found` : 'none' });
+    }
+    return out;
+  }
+
+  // ---------- report ----------
+
+  function report(result, opts) {
+    const r = result || (last && last.result);
+    if (!r) return 'antijank: nothing recorded yet';
+    const maxLines = (opts && opts.maxLines) || (last && last.opts.maxLines) || DEFAULTS.maxLines;
+    const head = [
+      `antijank ${r.version}`,
+      r.status === 'settled' ? `settled after ${r.duration}ms` : r.status === 'timeout' ? `did not settle within ${r.duration}ms` : r.status,
+      `${r.frames} frames`,
+      `${r.elements} elements${r.truncated ? ` (+${r.truncated} not watched: narrow root)` : ''}`,
+      `probe ${r.probeMs ? r.probeMs.avg : '?'}ms/frame`,
+    ].join(' · ');
+    const lines = [head];
+    if (r.stillChanging && r.stillChanging.length)
+      lines.push(`still changing at the end: ${r.stillChanging.join('; ')} (raise timeout, pass waitFor, or ignore them)`);
+    if (r.status === 'hidden') lines.push('The page is hidden, so the browser pauses frames. Show the tab or pane and record again.');
+    if (r.error) lines.push(`error: ${r.error}`);
+    const fs = r.findings || [];
+    if (!fs.length && r.status !== 'hidden' && !r.error) lines.push('no jank found');
+    for (const x of fs.slice(0, maxLines)) {
+      lines.push(
+        `${x.severity.toUpperCase().padEnd(6)} ${('+' + x.t + 'ms').padEnd(8)} ${x.element} — ${x.message}${x.cause ? ` [cause: ${x.cause}]` : ''}`
+      );
+    }
+    if (fs.length > maxLines) lines.push(`(+${fs.length - maxLines} more in antijank.result().findings)`);
+    for (const e of r.expectations || []) lines.push(`expect ${e.pass ? '✓' : '✗'} ${e.name}: ${e.detail}`);
+    if (r.probeMs && r.probeMs.avg > 4) lines.push(`note: the probe took ${r.probeMs.avg}ms per frame; narrow \`root\` so it doesn't disturb timing`);
+    return lines.join('\n');
+  }
+
+  // ---------- public API ----------
+
+  function stop() {
+    if (current) finish(current, 'stopped');
+    return last && last.result;
+  }
+
+  async function record(action, opts) {
+    const done = start(opts);
+    if (typeof action === 'function') await action();
+    return done;
+  }
+
+  function timeline(sel, all) {
+    if (!last) return [];
+    const trs = matching(last, sel);
+    if (all) return trs.map((tr) => ({ element: descOf(tr), born: tr.born, died: tr.died, frames: frameRows(tr) }));
+    return trs[0] ? frameRows(trs[0]) : [];
+  }
+  function frameRows(tr) {
+    const s = series(last, tr);
+    return last.frames.map((t, f) => ({
+      f,
+      t: Math.round(t),
+      x: s.vx[f] == null ? null : round(s.vx[f], 1),
+      y: s.vy[f] == null ? null : round(s.vy[f], 1),
+      w: s.w[f] == null ? null : round(s.w[f], 1),
+      h: s.h[f] == null ? null : round(s.h[f], 1),
+      opacity: round(s.o[f], 3),
+      visibleArea: Math.round(s.a[f]),
+    }));
+  }
+
+  window.antijank = {
+    version: VERSION,
+    start,
+    stop,
+    record,
+    report,
+    timeline,
+    result: () => last && last.result,
+    expect: (spec) => (last ? check(last, spec) : []),
+    get recording() {
+      return !!current;
+    },
+    thresholds: THRESHOLDS,
+    // Internal state of the last recording, for debugging the probe itself.
+    _debug: () => last,
+  };
+
+  // Recording from page load: the runner sets this before the page's own scripts run.
+  const auto = window.__antijankAutostart;
+  if (auto) {
+    window.__antijankAutostart = null;
+    start(auto);
+  }
+})();

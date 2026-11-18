@@ -1,0 +1,13 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.box{width:160px;height:96px;background:#4a7dff;color:#fff}</style><script src="_lib.js"></script>
+<title>clean: a remounted copy glides 200px down (expectation follows the copy)</title>
+<body><div id="slot" style="margin:20px"><div class="box" data-composer>Draft</div></div>
+<script>
+EXPECT = { allow: ["swap"] };
+OPTIONS = { expect: { moves: { "[data-composer]": { dy: 200, tolerance: 2 } } } };
+trigger = async () => {
+  const old = slot.firstElementChild;
+  const c = old.cloneNode(false);
+  old.replaceWith(c);
+  await tween(250, (p) => (c.style.transform = `translateY(${p * 200}px)`));
+};
+</script>

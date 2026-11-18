@@ -1,0 +1,35 @@
+{
+  "name": "antijank",
+  "version": "0.1.0",
+  "description": "Headless animation review for coding agents: records how elements move and fade frame by frame and reports jank (jumps, flashes, pop-ins, pushed neighbours, scroll jumps) without screenshots.",
+  "type": "module",
+  "license": "MIT",
+  "author": "MassiveMassimo",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MassiveMassimo/antijank.git"
+  },
+  "keywords": ["animation", "jank", "layout-shift", "flip", "agent-skills", "playwright", "claude-code"],
+  "bin": {
+    "antijank": "skills/antijank/scripts/run.mjs"
+  },
+  "files": ["skills/antijank"],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "peerDependencies": {
+    "playwright": ">=1.45"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "playwright": "1.65.0"
+  },
+  "packageManager": "pnpm@12.15.0"
+}

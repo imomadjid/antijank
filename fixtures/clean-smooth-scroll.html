@@ -1,0 +1,8 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.box{width:160px;height:96px;background:#4a7dff;color:#fff}.row{height:40px;margin:4px 16px;background:#dde5ff}</style><script src="_lib.js"></script>
+<title>clean: list scrolls smoothly</title>
+<body><div id="sc" style="height:300px;overflow:auto;margin:20px;border:1px solid #ccc"></div>
+<script>
+for (let i = 0; i < 60; i++) { const r = document.createElement("div"); r.className = "row"; r.textContent = "Row " + i; sc.append(r); }
+EXPECT = { none: true };
+trigger = () => tween(400, (p) => (sc.scrollTop = p * 600), (t) => t * t * (3 - 2 * t));
+</script>
