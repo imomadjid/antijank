@@ -1,13 +1,13 @@
 ---
 name: antijank
-description: Headless animation and transition review. Records how elements move and fade frame by frame in a real browser and reports jank as text, with no screenshots - one-frame jumps, flashes at the wrong position, pop-ins without a fade, neighbours pushed in one frame, reversals, late corrections, flicker, scroll jumps, stretched text, slow frames. Use it after any change to animation, transitions, layout or anything that appears, disappears or moves (FLIP, layout and shared-element animations, accordions, toasts, modals, lists, chat messages, page loads), when the user reports something "jumps", "flashes", "flickers", "snaps", "shifts" or "feels janky", and to confirm a motion fix actually worked before calling it done.
+description: Catches one-frame UI glitches that screenshots miss. Records every element's position and opacity on every frame of an interaction in a real browser and reports, as a few lines of text, what jumped, flashed, popped in without a fade, pushed its neighbours, reversed, flickered or scrolled abruptly. Use it when the user reports that something "jumps", "flashes", "flickers", "snaps", "shifts" or "feels janky"; after writing or changing an animation or transition (FLIP, layout or shared-element animations, accordions, toasts, modals, list inserts, chat messages); and to confirm a motion fix worked before calling it done.
 ---
 
 # antijank
 
 Measure motion instead of looking at it. A probe runs in the page, reads every watched element's box, effective opacity and scroll position after each painted frame, and reports only what looks wrong. You get a few lines of text per interaction, not frames to inspect.
 
-It reports facts ("moved down 44px in one frame"), not taste. Judging whether a duration or easing feels right is a separate review.
+It reports facts ("moved down 44px in one frame"), not taste. Judging whether a duration or easing feels right is a separate review. Defects (blips, jumps, flicker, pushed neighbours) come first; changes that simply have no transition (pop-ins, swaps) are listed apart, because instant is often the right choice.
 
 ## Pick how to run it
 
@@ -19,7 +19,17 @@ node <skill-dir>/scripts/run.mjs http://localhost:3000 --steps steps.json --matr
 node <skill-dir>/scripts/run.mjs http://localhost:3000/settings            # records the page load
 ```
 
-`<skill-dir>` is this skill's folder (where this file is). If the project has no Playwright, the runner says so; install it with the project's package manager and run `npx playwright install chromium`. Run `node <skill-dir>/scripts/run.mjs --help` for every option.
+`<skill-dir>` is this skill's folder (where this file is). The runner is Chromium-only and runs on Node, whatever the project uses. If the project has no Playwright, the runner says so. Add it with the package manager the project already uses (look at the lockfile), then download Chromium:
+
+| Lockfile | Add Playwright | Download Chromium |
+| --- | --- | --- |
+| `pnpm-lock.yaml` | `pnpm add -D playwright` | `pnpm exec playwright install chromium` |
+| `yarn.lock` | `yarn add -D playwright` | `yarn playwright install chromium` |
+| `bun.lock` / `bun.lockb` | `bun add -d playwright` | `bunx playwright install chromium` |
+| `deno.lock` | `deno add npm:playwright` (with `"nodeModulesDir": "auto"` in `deno.json`, so Node can find it) | `deno run -A npm:playwright install chromium` |
+| `package-lock.json` or none | `npm i -D playwright` | `npx playwright install chromium` |
+
+Ask before adding a dependency to someone else's project. Run `node <skill-dir>/scripts/run.mjs --help` for every option.
 
 **B. A browser you already drive** (Playwright MCP, Chrome DevTools MCP, any tool that runs JavaScript in the page). Load the probe, then record around the action:
 
@@ -59,9 +69,10 @@ Without `hold`, the recording settles as soon as nothing has moved for about 330
 1. **Decide what to record.** One interaction per recording: the trigger, the part of the page that should react (`root`), and what "done" means. If the change waits on the network, pass `waitFor` with a selector that exists once it has arrived, or recording may settle before anything happens.
 2. **Use a production build when you can.** Dev builds replay effects (React StrictMode) and hot reload adds stalls, so motion can differ from what ships. If you must use dev, say so when you report.
 3. **Record and read the report.** Severity is a starting point: HIGH is almost always visible, LOW is often fine.
-4. **Write expectations for what should happen** (below) and rerun with them. This turns "looks fine" into pass/fail, and the same spec can guard against regressions later.
-5. **Fix the cause, then rerun.** Use `--matrix` for the final check. It runs at normal speed, with the CPU slowed 4× and with reduced motion, because timing bugs (a slow first frame eating an animation, a late transform) often appear only when the CPU is slow.
-6. **Report with numbers**, for example "composer moves 245 → 562px over 170ms, nothing else moves more than 1px, 0 findings in all three conditions".
+4. **Decide which findings are intended.** Unanimated changes are listed apart from defects. Instant is a valid choice for tabs, menus, tooltips and anything frequent or keyboard-driven, so don't add animation just to clear a finding. Pin the intended behaviour with an expectation, or mark the element `data-antijank-ignore`.
+5. **Write expectations for what should happen** (below) and rerun with them. This turns "looks fine" into pass/fail, and the same spec can guard against regressions later.
+6. **Fix the defects, then rerun.** Use `--matrix` for the final check. It runs at normal speed, with the CPU slowed 4× and with reduced motion, because timing bugs (a slow first frame eating an animation, a late transform) often appear only when the CPU is slow.
+7. **Report with numbers**, for example "composer moves 245 → 562px over 170ms, nothing else moves more than 1px, 0 findings in all three conditions".
 
 ## Findings and their usual causes
 
@@ -71,11 +82,11 @@ Without `hold`, the recording settles as soon as nothing has moved for about 330
 | `jump` (start) | Big first step, then a smooth move | Animation starts from the wrong origin, or the first frame paints before the start value is set |
 | `jump` (end) / snap | Smooth move, then a snap at the end | Wrong target (stale measurement), or the transform is cleared before the layout matches |
 | `jump` (mid) | One frame far bigger than its neighbours | Layout changed mid-animation (content arrived), or two animations handing over |
-| `shift` | A resting element moved in one frame | Something above it was inserted, removed or resized with no animation. The cause names it. Animate the size, reserve space, or overlay instead |
-| `pop-in` / `pop-out` | Appeared or vanished at full opacity | No enter or exit animation, or the enter transition never ran because the starting style was never rendered (class removed in the same frame it was added) |
+| `shift` | A resting element moved in one frame | Something above it was inserted, removed or resized with no animation. `[cause: …]` names an insertion, removal or move; `[same frame: …]` names a resize in the same frame, a likely cause rather than a proven one. Animate the size, reserve space, or overlay instead |
+| `pop-in` / `pop-out` | Appeared or vanished at full opacity (unanimated) | Fine if instant is intended. Otherwise there is no enter or exit animation, or the enter transition never ran because the starting style was never rendered (class removed in the same frame it was added) |
 | `flash` | Visible for only 1–2 frames | A placeholder or stale state rendering for a frame; conditional rendering flip-flopping |
 | `flicker` | Opacity dipped and came back | Remount (key change), a state reset, or an exit animation restarting |
-| `swap` | One element replaced by another in place, no crossfade | Shared-element or hero transition missing |
+| `swap` | One element replaced by another in place, no crossfade (unanimated) | Fine for tabs and instant views. Otherwise a shared-element or hero transition is missing |
 | `reversal` | Turned back partway through a move | Two animations driving one value, or a retarget toward an old position |
 | `oscillation` | Direction flips frame to frame | Two scripts fighting (scroll anchoring against a follow, a ResizeObserver loop) |
 | `resettle` | Moved again after resting | Correction after a late measurement (fonts, images, async content) |
@@ -103,7 +114,8 @@ Pass `expect` (option or `--expect`) to get pass/fail lines and exit code 1 on f
 - `moves`: net displacement from first to last frame, in px. If the element is remounted, it follows whichever copy is on screen.
 - `still`: elements that must not move more than `maxShift`. Use `"others"` for everything present the whole time and not named elsewhere. A selector that matches nothing fails.
 - `fadesIn`: the element must be below 50% opacity on its first visible frame and at 90% or more at the end. `fadesOut`: below 50% on its last visible frame.
-- `noFindings`: no finding at or above that severity.
+- `noFindings`: no finding at or above that severity, unanimated ones included.
+- The runner's `--fail-on <severity>` exits 1 on defects at or above that severity. Unanimated changes don't count there; require a fade with `fadesIn` or `fadesOut` instead.
 - Any selector that matches nothing fails its expectation, so a typo can't pass silently.
 
 ## Keeping the report useful
@@ -115,7 +127,7 @@ Pass `expect` (option or `--expect`) to get pass/fail lines and exit code 1 on f
 - Infinite CSS and Web Animations (spinners, shimmer) are ignored automatically. A JavaScript loop that never stops (a ticker) makes the recording time out; elements whose own position or opacity changed in most frames (for at least 60 frames) are then left out and listed as loops. Their parents and children are still judged on their own. Mark anything else with `data-antijank-ignore`.
 - At most 1500 elements are watched from the start, plus 1000 added during the recording. Past that the report warns that findings may be missing; narrow `root`.
 - Streaming text grows continuously, so expect `shift` findings caused by "grew taller (text changed)". Judge whether that growth should be smoothed.
-- The header line shows the probe's cost per frame: about 4ms for 1500 elements on a fast laptop, more with the CPU slowed. Reading layout after every frame can disturb a page that is already near its frame budget, so if the cost is above about 4ms, narrow `root`.
+- The header line shows the probe's cost per frame: roughly 4–8ms per 1000 elements on a fast laptop, more with the CPU slowed. Reading layout after every frame can disturb a page that is already near its frame budget, so if the cost is above about 4ms, narrow `root`.
 - Thresholds can be overridden: `{ thresholds: { shift: 4, popArea: 1000 } }` (see `antijank.thresholds`).
 
 ## What it can't see
@@ -126,8 +138,11 @@ Pass `expect` (option or `--expect`) to get pass/fail lines and exit code 1 on f
 - Shapes inside an `<svg>`: only the `<svg>` box is watched.
 - Hidden tabs: browsers pause frames there, so the probe refuses to record (`status: hidden`). Bring the tab or pane to the front.
 - Headless timing is close to real but not identical. Treat 1–2 frame differences as approximate.
+- What the compositor shows during a main-thread stall. CSS and Web Animations of transform and opacity keep moving on screen while the main thread is busy; the probe only sees where they got to. Jumps right after a slow frame on such elements are left out, and the slow frame is reported.
+- View Transitions: the morph runs in `::view-transition` pseudo-elements. The report says when one ran and leaves out element findings from that window. Judge the transition itself another way.
+- Browsers other than Chromium: Safari- or Firefox-only jank is out of reach.
 - Virtualized lists recycle nodes, so a recycled row can look like a jump. Scope `root` away from them, or ignore them.
-- Layout-shift entries from the browser ignore transforms. The probe does not rely on them: it reads boxes directly, so FLIP, layout and shared-element animations are covered.
+- Layout-shift entries from the browser ignore transforms. The probe does not rely on them: it reads boxes directly, so FLIP and layout animations are covered. The entries are kept in the JSON result (`layoutShifts`) for reference.
 
 ## Inspecting one element
 

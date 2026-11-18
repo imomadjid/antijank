@@ -65,3 +65,13 @@ test('a click that leaves the page is a named setup error', () => {
   assert.equal(r.status, 2);
   assert.match(r.stderr, /step 1 .* navigated to .*pop-in\.html/);
 });
+
+// Real input makes Chromium render several frames back to back; a one-frame glitch behind a
+// real click must still be caught, also with a slow CPU.
+for (const cpu of ['1', '4']) {
+  test(`a one-frame late FLIP behind a real click is caught (cpu ×${cpu})`, () => {
+    const r = run(fixture('late-flip-click.html'), '--click', '#add', '--cpu', cpu, '--runs', '3');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /snapped back \(cpu×\d 3\/3\)|snapped back \(normal 3\/3\)/);
+  });
+}

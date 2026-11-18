@@ -53,6 +53,8 @@
   ]);
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const SEV = { high: 3, medium: 2, low: 1 };
+  // Changes with no transition. Reported apart from defects: instant is often right.
+  const UNANIMATED = new Set(['pop-in', 'pop-out', 'swap', 'opacity-snap']);
   const LAYOUT_PROP =
     /^(width|height|top|left|right|bottom|inset|margin|padding|minWidth|minHeight|maxWidth|maxHeight|flexBasis|gridTemplate|fontSize|lineHeight|borderWidth)/;
 
@@ -86,6 +88,19 @@
     for (const n of el.childNodes) if (n.nodeType === 3) t += n.data;
     return t.trim();
   };
+  // Visible-ish text: skips <style>, <script> and the like (an <html> or <body> would
+  // otherwise be named by its CSS).
+  function textOf(el) {
+    if (el.localName === 'html' || el.localName === 'head') return '';
+    let t = '';
+    const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.parentElement && SKIP_TAGS.has(n.parentElement.tagName) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
+    let n;
+    while ((n = w.nextNode()) && t.length < 60) t += n.data;
+    return t;
+  }
+
   function describe(el) {
     if (!el || el.nodeType !== 1) return String(el);
     let s = el.tagName.toLowerCase();
@@ -112,7 +127,7 @@
       const cls = el.className.split(/\s+/).filter((c) => c && !/[:[\]/!@%()]/.test(c)).slice(0, 2);
       if (cls.length) s += '.' + cls.join('.');
     }
-    const text = squash(el.textContent || '', 24);
+    const text = squash(textOf(el), 24);
     if (text) s += ` "${text}"`;
     return s;
   }
@@ -182,6 +197,7 @@
       mutations: [],
       anims: new Map(),
       ignored: new Set(),
+      vtFrames: new Set(),
       roots: null,
       extraRoots: [],
       layoutShifts: [],
@@ -256,7 +272,17 @@
     };
     const tick = (ts) => {
       if (rec.status !== 'recording') return;
-      // Sample after this frame paints: a task posted from rAF runs once rendering is done.
+      // Sample after this frame paints: a task posted from rAF normally runs once rendering
+      // is done. Right after real input, Chromium can render several frames back to back
+      // before that task gets a turn. Then the last frame is still unsampled when the next
+      // one starts, and nothing has run in between, so sample it here, before the page's
+      // own callbacks for this frame change anything.
+      if (rec.pendingTs != null) {
+        const prev = rec.pendingTs;
+        rec.pendingTs = null;
+        onFrame(rec, prev, false);
+        if (rec.status !== 'recording') return;
+      }
       rec.pendingTs = ts;
       rec.channel.port2.postMessage(0);
       rec.raf = requestAnimationFrame(tick);
@@ -491,7 +517,17 @@
         // Scroll-driven animations follow scroll, not time: they never "finish" and aren't motion to settle.
         const scrollDriven = !!a.timeline && typeof DocumentTimeline !== 'undefined' && !(a.timeline instanceof DocumentTimeline);
         const infinite = timing.iterations === Infinity || timing.endTime === Infinity;
-        info = { f, target, kind: a.constructor.name, props: animProps(a), duration: timing.duration, infinite, scrollDriven };
+        const pseudo = (a.effect && a.effect.pseudoElement) || '';
+        info = {
+          f,
+          target,
+          kind: a.constructor.name,
+          props: animProps(a),
+          duration: timing.duration,
+          infinite,
+          scrollDriven,
+          vt: pseudo.startsWith('::view-transition'),
+        };
         rec.anims.set(a, info);
         // An infinite animation on ::before / ::after is the pseudo's alone; the element still counts.
         if (infinite && target && target.nodeType === 1 && !a.effect.pseudoElement) {
@@ -499,6 +535,7 @@
           for (const tr of rec.tracks.values()) if (target.contains(tr.el)) tr.skip = true;
         }
       }
+      if (info.vt && a.playState === 'running') rec.vtFrames.add(f);
       if (!info.infinite && !info.scrollDriven && a.playState === 'running') {
         const tr = info.target && rec.trackOf.get(info.target);
         if (!tr || !tr.skip) running = true;
@@ -1034,6 +1071,17 @@
     }
 
     const visibleAt = (s, f) => s.a[f] > 0 || (f > 0 && s.a[f - 1] > 0);
+    // During a main-thread stall the compositor keeps CSS and Web Animations of transform and
+    // opacity moving on screen; the probe only sees where they got to afterwards. A jump right
+    // after a slow frame on such an element isn't visible, so it is left out (the slow frame
+    // is still reported).
+    const COMPOSITED = /^(transform|translate|rotate|scale|opacity|filter)$/;
+    const composited = [...rec.anims.values()].filter(
+      (i) => !i.scrollDriven && !i.vt && i.target && i.target.nodeType === 1 && i.props.length && i.props.every((p) => COMPOSITED.test(p))
+    );
+    const stalled = (f) => f > 0 && rec.frames[f] - rec.frames[f - 1] >= T.slowFrame;
+    const offThread = (tr) => composited.some((i) => i.target.contains(tr.el));
+    let stallJumps = 0;
     for (const tr of tracks) {
       const moved = tr.rows.length > 1 || tr.born > 0 || tr.died !== null;
       if (!moved || !tr.paints) continue;
@@ -1044,7 +1092,14 @@
         const v = axis === 'x' ? s.vx : s.vy;
         const c = axis === 'x' ? s.cx : s.cy;
         const xs = pathLength(c) <= pathLength(v) ? c : v;
-        for (const e of axisEvents(xs, T, wt)) if (visibleAt(s, e.f)) add(e, axis);
+        for (const e of axisEvents(xs, T, wt)) {
+          if (!visibleAt(s, e.f)) continue;
+          if ((e.type === 'jump' || e.type === 'shift') && stalled(e.f) && offThread(tr)) {
+            stallJumps++;
+            continue;
+          }
+          add(e, axis);
+        }
       }
       for (const e of presenceEvents(s, tr.born === 0 ? 1 : tr.born + 1 > 1 ? tr.born : 1, T, scrolled)) {
         // Elements present in the first frame they were tracked (page load) are the baseline.
@@ -1137,7 +1192,7 @@
 
     const seenAnim = new Set();
     for (const info of rec.anims.values()) {
-      if (info.infinite || info.scrollDriven || !info.target || info.target.nodeType !== 1) continue;
+      if (info.infinite || info.scrollDriven || info.vt || !info.target || info.target.nodeType !== 1) continue;
       const layout = info.props.map((p) => p.replace(/-([a-z])/g, (_, ch) => ch.toUpperCase())).filter((p) => LAYOUT_PROP.test(p));
       if (!layout.length) continue;
       const key = idOf(info.target) + layout.join();
@@ -1146,7 +1201,22 @@
       findings.push({ type: 'layout-anim', f: info.f, props: layout, el: info.target });
     }
 
-    const out = finalize(rec, findings.filter((x) => !(x.swapped && (x.type === 'pop-in' || x.type === 'pop-out'))), S, sizeChanged, T);
+    // While a View Transition runs, the screen shows its ::view-transition pseudo-elements
+    // (snapshots), not the live elements underneath, so element findings from that window
+    // say nothing about what was seen. The DOM swap lands a frame or two before its
+    // animations start.
+    const vt = [...rec.vtFrames].sort((a, b) => a - b);
+    const inVT = (f) => vt.length > 0 && f >= vt[0] - 3 && f <= vt[vt.length - 1] + 1;
+    let vtLeftOut = 0;
+    const kept = findings.filter((x) => {
+      if (x.swapped && (x.type === 'pop-in' || x.type === 'pop-out')) return false;
+      if ((x.tr || x.type === 'swap') && inVT(x.f)) {
+        vtLeftOut++;
+        return false;
+      }
+      return true;
+    });
+    const out = finalize(rec, kept, S, sizeChanged, T);
     const result = {
       version: VERSION,
       status: rec.status,
@@ -1163,6 +1233,10 @@
       findings: out,
       counts: { high: 0, medium: 0, low: 0 },
       expectations: rec.opts.expect ? check(rec, rec.opts.expect, S, out) : [],
+      stallJumps,
+      viewTransition: vt.length
+        ? { from: Math.round(rec.frames[vt[0]] || 0), to: Math.round(rec.frames[vt[vt.length - 1]] || 0), leftOut: vtLeftOut }
+        : null,
       loops: loops.filter((t) => !loops.some((o) => o.el !== t.el && o.el.contains(t.el))).slice(0, 5).map(descOf),
       layoutShifts: rec.layoutShifts.map((l) => ({ ...l, t: Math.round(l.t), value: round(l.value, 4) })),
       slowFrames: rec.loafs.map((l) => ({ ...l, t: Math.round(l.t), duration: Math.round(l.duration) })),
@@ -1325,7 +1399,8 @@
         Math.abs(dh) >= Math.abs(dw)
           ? `got ${px(dh)} ${dh > 0 ? 'taller' : 'shorter'}`
           : `got ${px(dw)} ${dw > 0 ? 'wider' : 'narrower'}`;
-      return `${descOf(tr)} ${what}${textChanged ? ' (text changed)' : ''}`;
+      // A resize in the same frame is a likely cause, not a proven one.
+      return { text: `${descOf(tr)} ${what}${textChanged ? ' (text changed)' : ''}`, sure: false };
     }
     return '';
   }
@@ -1369,19 +1444,22 @@
         if (x.inserted.isConnected && r.width) Object.assign(x, { w: r.width, h: r.height });
       } else if (x.n > 1) element += ` ×${x.n}`;
       const moving = new Set(kept.filter((k) => k.f === x.f && k.tr).map((k) => k.tr));
-      const cause = x.type === 'shift' || x.type === 'blip' ? causeAt(rec, x.f, S, sizeChanged, moving) : '';
+      const c = x.type === 'shift' || x.type === 'blip' ? causeAt(rec, x.f, S, sizeChanged, moving) : '';
       return {
         severity: sev,
         type: x.type,
+        // Unanimated changes are facts, not necessarily defects: instant is a valid choice.
+        group: UNANIMATED.has(x.type) ? 'unanimated' : 'defect',
         t,
         frame: x.f,
         element,
         message: message(x),
-        cause,
+        cause: typeof c === 'string' ? c : c.text,
+        causeSure: typeof c === 'string' ? !!c : c.sure,
         amount: x.amount != null ? round(x.amount, 1) : undefined,
       };
     });
-    list.sort((a, b) => SEV[b.severity] - SEV[a.severity] || a.t - b.t);
+    list.sort((a, b) => (a.group === b.group ? 0 : a.group === 'defect' ? -1 : 1) || SEV[b.severity] - SEV[a.severity] || a.t - b.t);
     return list;
   }
 
@@ -1573,18 +1651,37 @@
     if (r.truncated)
       lines.push(`warning: ${r.truncated} elements were not watched (over maxElements), so findings may be missing. Narrow \`root\`.`);
     if (r.loops && r.loops.length) lines.push(`left out as continuous loops: ${r.loops.join('; ')}`);
+    if (r.viewTransition)
+      lines.push(
+        `a View Transition ran +${r.viewTransition.from}–${r.viewTransition.to}ms; it animates ::view-transition snapshots the probe can't see, so ${r.viewTransition.leftOut} element finding${r.viewTransition.leftOut === 1 ? '' : 's'} from that window ${r.viewTransition.leftOut === 1 ? 'was' : 'were'} left out`
+      );
+    if (r.stallJumps)
+      lines.push(`left out: ${r.stallJumps} jump${r.stallJumps > 1 ? 's' : ''} after a slow frame on compositor animations, which keep moving on screen while the main thread is busy`);
     if (r.stillChanging && r.stillChanging.length)
       lines.push(`still changing at the end: ${r.stillChanging.join('; ')} (raise timeout, pass waitFor, or ignore them)`);
     if (r.status === 'hidden') lines.push('The page is hidden, so the browser pauses frames. Show the tab or pane and record again.');
     if (r.error) lines.push(`error: ${r.error}`);
     const fs = r.findings || [];
     if (!fs.length && r.status !== 'hidden' && !r.error) lines.push('no jank found');
-    for (const x of fs.slice(0, maxLines)) {
-      lines.push(
-        `${x.severity.toUpperCase().padEnd(6)} ${('+' + x.t + 'ms').padEnd(8)} ${x.element} — ${x.message}${x.cause ? ` [cause: ${x.cause}]` : ''}`
-      );
+    const line = (x) =>
+      `${x.severity.toUpperCase().padEnd(6)} ${('+' + x.t + 'ms').padEnd(8)} ${x.element} — ${x.message}${
+        x.cause ? ` [${x.causeSure === false ? 'same frame' : 'cause'}: ${x.cause}]` : ''
+      }`;
+    const defects = fs.filter((x) => x.group !== 'unanimated');
+    const unanimated = fs.filter((x) => x.group === 'unanimated');
+    let shown = 0;
+    for (const x of defects.slice(0, maxLines)) {
+      lines.push(line(x));
+      shown++;
     }
-    if (fs.length > maxLines) lines.push(`(+${fs.length - maxLines} more in antijank.result().findings)`);
+    if (unanimated.length) {
+      lines.push('unanimated, fine if instant is intended (tabs, menus, frequent or keyboard-driven UI):');
+      for (const x of unanimated.slice(0, Math.max(3, maxLines - shown))) {
+        lines.push('  ' + line(x));
+        shown++;
+      }
+    }
+    if (fs.length > shown) lines.push(`(+${fs.length - shown} more in antijank.result().findings)`);
     for (const e of r.expectations || []) lines.push(`expect ${e.pass ? '✓' : '✗'} ${e.name}: ${e.detail}`);
     if (r.probeMs && r.probeMs.avg > 4) lines.push(`note: the probe took ${r.probeMs.avg}ms per frame; narrow \`root\` so it doesn't disturb timing`);
     return lines.join('\n');

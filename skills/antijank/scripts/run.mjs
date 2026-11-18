@@ -32,7 +32,8 @@ Options
   --runs <n>              repeat each condition n times (flaky findings show as k/n)
   --storage-state <file>  signed-in session saved by Playwright
   --timeout <ms>          longest a recording waits to settle (default 5000)
-  --fail-on <severity>    exit 1 if a finding is at least high|medium|low
+  --fail-on <severity>    exit 1 if a defect is at least high|medium|low (unanimated
+                          changes don't count; require fades with --expect fadesIn)
   --json <file>           write every result as JSON
   --headed                show the browser
   -h, --help
@@ -318,7 +319,8 @@ async function main() {
 
   const failedExpect = all.some((r) => (r.result.expectations || []).some((e) => !e.pass));
   const floor = SEV[v['fail-on']] || Infinity;
-  const tooBad = all.some((r) => (r.result.findings || []).some((f) => SEV[f.severity] >= floor));
+  // Unanimated changes (pop-ins, swaps) can be intended; check those with expectations instead.
+  const tooBad = all.some((r) => (r.result.findings || []).some((f) => f.group !== 'unanimated' && SEV[f.severity] >= floor));
   const hidden = all.some((r) => r.result.status === 'hidden' || r.result.status === 'error');
   process.exitCode = hidden ? 2 : failedExpect || tooBad ? 1 : 0;
 }

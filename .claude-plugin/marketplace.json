@@ -5,7 +5,7 @@
     {
       "name": "antijank",
       "source": "./",
-      "description": "Headless animation review: records how elements move and fade frame by frame and reports jank without screenshots."
+      "description": "Catches one-frame UI glitches coding agents can't see in screenshots: records every element's position and opacity on every frame and reports jumps, flashes, pop-ins and pushed neighbours as text."
     }
   ]
 }

@@ -1,0 +1,29 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.row{height:40px;margin:4px 16px;background:#dde5ff;color:#1f2328}button{margin:16px}</style><script src="_lib.js"></script>
+<title>planted: a click inserts a row and applies the FLIP one frame late (an effect instead of a layout effect)</title>
+<body><button id="add">Add</button><div id="list"><div class="row">a</div><div class="row">b</div><div class="row">c</div></div>
+<script>
+EXPECT = { has: ["blip"], allow: ["pop-in"], message: "for 1 frame" };
+const after = (n, fn) => (n ? requestAnimationFrame(() => after(n - 1, fn)) : fn());
+add.onclick = () => {
+  const rows = [...list.children];
+  const first = rows.map((r) => r.getBoundingClientRect().top);
+  const n = document.createElement("div");
+  n.className = "row";
+  n.textContent = "new";
+  n.style.opacity = 0;
+  list.prepend(n);
+  after(2, () => {
+    rows.forEach((r, i) => {
+      const d = first[i] - r.getBoundingClientRect().top;
+      r.style.transition = "none";
+      r.style.transform = `translateY(${d}px)`;
+      r.offsetTop;
+      r.style.transition = "transform 250ms ease-out";
+      r.style.transform = "";
+    });
+    n.style.transition = "opacity 250ms";
+    n.style.opacity = 1;
+  });
+};
+trigger = () => add.click();
+</script>

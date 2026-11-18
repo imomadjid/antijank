@@ -1,0 +1,12 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}#box{width:100px;height:100px;margin:20px;background:#3b6fe0;transition:transform .6s ease-in-out}#box.on{transform:translateX(500px)}</style><script src="_lib.js"></script>
+<title>clean: the main thread stalls 250ms during a CSS transform transition (the compositor keeps it moving)</title>
+<body><div id="box"></div>
+<script>
+EXPECT = { allow: ["slow-frame"] };
+trigger = async () => {
+  box.classList.add("on");
+  await new Promise((r) => setTimeout(r, 150));
+  const t = performance.now();
+  while (performance.now() - t < 250);
+};
+</script>

@@ -1,0 +1,12 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.card{width:300px;height:200px;margin:20px;background:#3b6fe0;color:#fff}#b{margin-left:400px;background:#e07a3b;color:#1f2328}::view-transition-group(card){animation-duration:.3s}</style><script src="_lib.js"></script>
+<title>clean: a shared-element View Transition moves card A into card B (the morph runs in pseudo-elements)</title>
+<body><div id="slot"><div class="card" id="a" style="view-transition-name:card">Card A</div></div>
+<script>
+EXPECT = { none: true };
+trigger = async () => {
+  const t = document.startViewTransition(() => {
+    slot.innerHTML = '<div class="card" id="b" style="view-transition-name:card">Card B moved</div>';
+  });
+  await t.finished;
+};
+</script>
