@@ -803,6 +803,24 @@
         }
       }
     }
+    // Spikes: one frame far off the line through its neighbours while moving, as when a
+    // frame paints before its transform is set (a late FLIP mid-animation).
+    for (let i = a + 1; i < b; i++) {
+      if (used.has(i) || used.has(i + 1)) continue;
+      const dev = xs[i] - (xs[i - 1] + xs[i + 1]) / 2;
+      if (sign(d(i)) !== -sign(d(i + 1))) continue;
+      const near = [];
+      if (i - 1 > a) near.push(Math.abs(d(i - 1)));
+      if (i + 2 <= b) near.push(Math.abs(d(i + 2)));
+      const m = near.length ? Math.max(...near) : 0;
+      // Both the step out and the step back are big: an end snap steps out by a pixel.
+      const out2 = Math.min(Math.abs(d(i)), Math.abs(d(i + 1)));
+      if (Math.abs(dev) >= Math.max(T.shift, 4) && Math.abs(dev) >= 3 * Math.max(m, T.eps) && out2 >= 2 * Math.max(m, T.eps)) {
+        out.push({ type: 'blip', f: i, amount: dev, frames: 1 });
+        used.add(i);
+        used.add(i + 1);
+      }
+    }
     // Runs of consecutive moving frames.
     const runs = [];
     let run = null;
