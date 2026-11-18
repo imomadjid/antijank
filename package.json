@@ -9,11 +9,23 @@
     "type": "git",
     "url": "git+https://github.com/imomadjid/antijank.git"
   },
-  "keywords": ["animation", "jank", "layout-shift", "flip", "agent-skills", "playwright", "claude-code"],
+  "homepage": "https://github.com/imomadjid/antijank#readme",
+  "bugs": "https://github.com/imomadjid/antijank/issues",
+  "keywords": [
+    "animation",
+    "jank",
+    "layout-shift",
+    "flip",
+    "agent-skills",
+    "playwright",
+    "claude-code"
+  ],
   "bin": {
     "antijank": "skills/antijank/scripts/run.mjs"
   },
-  "files": ["skills/antijank"],
+  "files": [
+    "skills/antijank"
+  ],
   "engines": {
     "node": ">=22"
   },

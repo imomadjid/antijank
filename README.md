@@ -1,13 +1,13 @@
 # antijank
 
 [![test](https://github.com/imomadjid/antijank/actions/workflows/test.yml/badge.svg)](https://github.com/imomadjid/antijank/actions/workflows/test.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/imomadjid/antijank/blob/main/LICENSE)
 
 Catch the one-frame UI glitches your coding agent can't see.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/hero-dark.svg">
-  <img alt="Seven frames of a card sliding down. In frame 4 it lands 38px below its path for one frame, then snaps back. antijank reports it as a HIGH blip." src="assets/hero-light.svg" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/imomadjid/antijank/main/assets/hero-dark.svg">
+  <img alt="Seven frames of a card sliding down. In frame 4 it lands 38px below its path for one frame, then snaps back. antijank reports it as a HIGH blip." src="https://raw.githubusercontent.com/imomadjid/antijank/main/assets/hero-light.svg" width="100%">
 </picture>
 
 Agents check UI with screenshots, and jank lives between them. A card that lands in the wrong place for one frame, a banner that shoves a list down 44px, a fade that never ran: each lasts about 16ms and is gone before the next screenshot.
@@ -92,30 +92,28 @@ Defects, listed first:
 
 Unanimated changes, listed apart: `pop-in`, `pop-out`, `swap` and `opacity-snap` mean something changed with no transition. That's often right: tabs, menus and anything frequent or keyboard-driven should be instant. Pin what you want with an expectation instead of adding animation to clear a finding.
 
-Expectations turn a recording into a test. `moves`, `still`, `fadesIn`, `fadesOut` and `noFindings` pass or fail, and the runner exits 1 on a failure. See [SKILL.md](skills/antijank/SKILL.md) for the full list and the usual cause of each finding.
+Expectations turn a recording into a test. `moves`, `still`, `fadesIn`, `fadesOut` and `noFindings` pass or fail, and the runner exits 1 on a failure. See [SKILL.md](https://github.com/imomadjid/antijank/blob/main/skills/antijank/SKILL.md) for the full list and the usual cause of each finding.
 
 ## Run it yourself
 
-The runner is one script. Point `SKILL` at wherever the skill was installed, such as `.claude/skills/antijank` or `~/.claude/skills/antijank`, or at `skills/antijank` in a clone of this repo:
+The runner works without an agent, using the Playwright in your project:
 
 ```bash
-SKILL=.claude/skills/antijank
-
 # record what a click does, watching only <main>
-node $SKILL/scripts/run.mjs http://localhost:3000 --click "#compose" --root main
+npx antijank http://localhost:3000 --click "#compose" --root main
 
 # record a page load
-node $SKILL/scripts/run.mjs http://localhost:3000/settings
+npx antijank http://localhost:3000/settings
 
 # scripted steps, at normal speed, with the CPU slowed 4× and with reduced motion
-node $SKILL/scripts/run.mjs http://localhost:3000 --steps steps.json --matrix
+npx antijank http://localhost:3000 --steps steps.json --matrix
 
 # in CI: fail on HIGH defects, and on anything that moves that shouldn't
-node $SKILL/scripts/run.mjs http://localhost:3000 --click "#compose" --fail-on high \
+npx antijank http://localhost:3000 --click "#compose" --fail-on high \
   --expect '{"still":"others","fadesIn":["[role=dialog]"]}'
 ```
 
-Run `node $SKILL/scripts/run.mjs --help` for every option. Findings alone don't fail a run; pass `--fail-on` or `--expect` for that.
+`pnpm dlx antijank`, `yarn dlx antijank` and `bunx antijank` work the same way. Run `npx antijank --help` for every option. Findings alone don't fail a run; pass `--fail-on` or `--expect` for that. The installed skill carries the same runner at `scripts/run.mjs`, which is what your agent runs.
 
 Or load `scripts/probe.js` into a page you already drive, such as Playwright, Puppeteer, a DevTools console or a browser MCP:
 
@@ -168,4 +166,4 @@ Each page in `fixtures/` either plants one kind of jank, which must be found, or
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/imomadjid/antijank/blob/main/LICENSE)

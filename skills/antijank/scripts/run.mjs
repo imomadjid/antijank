@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const PROBE = join(here, 'probe.js');
 
-const HELP = `antijank: headless animation review
+const HELP = `antijank: catch one-frame UI glitches (jumps, flashes, pop-ins, pushed neighbours)
 
 Usage
   antijank <url> [options]                 record the page load
