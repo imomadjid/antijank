@@ -8,7 +8,7 @@
 (() => {
   if (typeof window === 'undefined' || (window.antijank && window.antijank.version)) return;
 
-  const VERSION = '0.1.0';
+  const VERSION = '0.2.0';
 
   const THRESHOLDS = {
     eps: 0.5, // px: movement below this is noise
@@ -27,6 +27,8 @@
     blipFrames: 3, // "comes back" within this many frames
     scrollJump: 48,
     slowFrame: 50, // ms
+    forcedLayout: 20, // ms of forced style and layout in a slow frame worth naming
+    slowResponse: 100, // ms from an input to the first visible change
     stretch: 0.06, // scaleX/scaleY mismatch for text
   };
 
@@ -52,6 +54,14 @@
     'SOURCE', 'TRACK', 'PARAM', 'BASE', 'COL', 'COLGROUP', 'DATALIST', 'OPTION', 'OPTGROUP',
   ]);
   const SVG_NS = 'http://www.w3.org/2000/svg';
+  const INPUTS = ['pointerdown', 'pointerup', 'keydown', 'click'];
+  // Findings about how something moved, which a running animation may explain.
+  const MOTION = new Set(['blip', 'jump', 'reversal', 'oscillation', 'overshoot', 'resettle', 'stretch', 'flash', 'flicker', 'opacity-snap']);
+  // Which animated properties can explain a finding: opacity for fades, the rest for moves
+  // and resizes (camelCase from keyframes, kebab-case from transitions).
+  const FADES = new Set(['flash', 'flicker', 'opacity-snap']);
+  const FADE_PROPS = /^(all|opacity)$/i;
+  const MOVE_PROPS = /^(all|transform|translate|scale|rotate|offset|top|left|right|bottom|inset|width|height|min|max|margin|padding|flex|grid)/i;
   const SEV = { high: 3, medium: 2, low: 1 };
   // Changes with no transition. Reported apart from defects: instant is often right.
   const UNANIMATED = new Set(['pop-in', 'pop-out', 'swap', 'opacity-snap']);
@@ -203,6 +213,10 @@
       layoutShifts: [],
       loafs: [],
       overhead: [],
+      spans: [], // [start, end] of each of the probe's own callbacks, to keep them out of LoAF attribution
+      sampledAt: [], // when each frame was sampled, ms after t0
+      inputs: [],
+      synthetic: false, // accept script-dispatched events (only while record()'s action runs)
       status: 'recording',
       quiet: 0,
       truncated: 0,
@@ -242,22 +256,52 @@
         t: e.startTime - rec.t0,
         duration: e.duration,
         blocking: e.blockingDuration,
-        scripts: (e.scripts || [])
-          .slice()
-          .sort((a, b) => b.duration - a.duration)
-          .slice(0, 2)
-          .map((s) => {
-            const file = (u) => (u || '').split('#')[0].split('?')[0].split('/').pop();
-            const inv = s.invoker || '';
-            return {
-              duration: Math.round(s.duration),
-              // The invoker is a URL for top-level script runs; the file name says enough.
-              name: s.sourceFunctionName || (/^[a-z]+:\/\//i.test(inv) ? '' : inv),
-              source: file(s.sourceURL) || file(inv),
-            };
-          }),
+        // Every script, so the probe's own can be told apart later (analysis drops them).
+        all: (e.scripts || []).map((s) => {
+          const file = (u) => (u || '').split('#')[0].split('?')[0].split('/').pop();
+          const inv = s.invoker || '';
+          return {
+            start: s.startTime,
+            duration: s.duration,
+            forced: s.forcedStyleAndLayoutDuration || 0,
+            // The invoker is a URL for top-level script runs; the file name says enough.
+            name: s.sourceFunctionName || (/^[a-z]+:\/\//i.test(inv) ? '' : inv),
+            source: file(s.sourceURL) || file(inv),
+          };
+        }),
       })
     );
+    // Inputs, to time how long each one takes to show a response. A press runs from
+    // pointerdown to its click (or pointerup), and the response is timed from its end, so
+    // holding the button down isn't slowness. Typing is left out: a keystroke in a text
+    // field changes its value, which the probe can't see. Events dispatched by the page's
+    // own scripts count only while record()'s action runs (that is the interaction).
+    rec.onInput = (e) => {
+      if (!e.isTrusted && !rec.synthetic) return;
+      const el = e.target && e.target.nodeType === 1 ? e.target : null;
+      const target = el ? describe(el) : '';
+      const t = e.timeStamp - rec.t0;
+      const last = rec.inputs[rec.inputs.length - 1];
+      if (e.type === 'pointerup' || e.type === 'click') {
+        if (last && last.pointer && !last.ended && t - last.start < 10000) {
+          last.end = t;
+          last.ended = e.type === 'click';
+          return;
+        }
+        // Enter or Space on a button fires a click after its keydown: one input.
+        if (e.type === 'pointerup' || (last && last.key && t - last.start < 1000)) return;
+        rec.inputs.push({ start: t, end: t, input: 'click', target, pointer: true, ended: true });
+      } else if (e.type === 'pointerdown') {
+        rec.inputs.push({ start: t, end: t, input: 'click', target, pointer: true });
+      } else {
+        if (e.repeat || !['Enter', 'Escape', ' '].includes(e.key)) return;
+        const text = el && (el.isContentEditable || el.localName === 'textarea');
+        const field = el && el.localName === 'input' && !/^(button|submit|reset|checkbox|radio|image|file|color|range)$/.test(el.type);
+        if (text || (e.key === ' ' && field)) return;
+        rec.inputs.push({ start: t, end: t, input: `${e.key === ' ' ? 'Space' : e.key} key`, target, key: true });
+      }
+    };
+    for (const type of INPUTS) window.addEventListener(type, rec.onInput, { capture: true, passive: true });
     rec.onHide = () => document.visibilityState !== 'visible' && finish(rec, 'hidden');
     document.addEventListener('visibilitychange', rec.onHide);
     if (document.body) {
@@ -268,7 +312,7 @@
     rec.channel.port1.onmessage = () => {
       const ts = rec.pendingTs;
       rec.pendingTs = null;
-      if (ts != null) onFrame(rec, ts, false);
+      if (ts != null) sampleFrame(rec, ts);
     };
     const tick = (ts) => {
       if (rec.status !== 'recording') return;
@@ -280,7 +324,7 @@
       if (rec.pendingTs != null) {
         const prev = rec.pendingTs;
         rec.pendingTs = null;
-        onFrame(rec, prev, false);
+        sampleFrame(rec, prev);
         if (rec.status !== 'recording') return;
       }
       rec.pendingTs = ts;
@@ -460,6 +504,13 @@
     };
   }
 
+  // The probe's own callbacks show up in long-animation-frame entries; remember when they ran.
+  function sampleFrame(rec, ts) {
+    const s = performance.now();
+    onFrame(rec, ts, false);
+    rec.spans.push([s, performance.now()]);
+  }
+
   function onFrame(rec, ts, baseline) {
     if (rec.status !== 'recording') return;
     if (!rec.roots) {
@@ -471,6 +522,7 @@
     }
     const f = rec.frames.length;
     rec.frames.push(baseline ? 0 : Math.max(0, ts - rec.t0));
+    rec.sampledAt.push(performance.now() - rec.t0);
     takeMutations(rec, f);
     const running = scanAnimations(rec, f);
     const changed = sample(rec, f);
@@ -518,12 +570,33 @@
         const scrollDriven = !!a.timeline && typeof DocumentTimeline !== 'undefined' && !(a.timeline instanceof DocumentTimeline);
         const infinite = timing.iterations === Infinity || timing.endTime === Infinity;
         const pseudo = (a.effect && a.effect.pseudoElement) || '';
+        const props = animProps(a);
+        // CSS animations keep their timing function on the keyframes, not the effect.
+        let easing = '';
+        try {
+          easing = a.effect.getTiming().easing;
+          if (!easing || easing === 'linear') {
+            const k = a.effect.getKeyframes().find((x) => x.easing && x.easing !== 'linear');
+            if (k) easing = k.easing;
+          }
+        } catch (_) {
+          /* no timing */
+        }
         info = {
           f,
+          lastF: f,
           target,
           kind: a.constructor.name,
-          props: animProps(a),
+          props,
           duration: timing.duration,
+          delay: timing.delay || 0,
+          easing,
+          label: a.animationName
+            ? `animation ${a.animationName}`
+            : a.transitionProperty
+              ? `transition ${a.transitionProperty}`
+              : `Web Animation${a.id ? ` "${a.id}"` : ''} of ${props.join(', ') || 'unknown properties'}`,
+          pseudo,
           infinite,
           scrollDriven,
           vt: pseudo.startsWith('::view-transition'),
@@ -535,6 +608,7 @@
           for (const tr of rec.tracks.values()) if (target.contains(tr.el)) tr.skip = true;
         }
       }
+      if (a.playState === 'running') info.lastF = f;
       if (info.vt && a.playState === 'running') rec.vtFrames.add(f);
       if (!info.infinite && !info.scrollDriven && a.playState === 'running') {
         const tr = info.target && rec.trackOf.get(info.target);
@@ -715,6 +789,7 @@
     clearTimeout(rec.backstop);
     if (rec.mo) rec.mo.disconnect();
     if (rec.onHide) document.removeEventListener('visibilitychange', rec.onHide);
+    if (rec.onInput) for (const type of INPUTS) window.removeEventListener(type, rec.onInput, { capture: true });
     if (rec.channel) rec.channel.port1.onmessage = null;
     if (current === rec) current = null;
     for (const tr of rec.tracks.values())
@@ -1178,15 +1253,91 @@
       }
     }
 
+    // Long animation frames, without the probe's own callbacks: their reads can force a
+    // layout the page left pending, and that cost is the page's, not a script to blame.
+    const own = (s) => rec.spans.some(([a, b]) => s.start <= a + 1 && s.start + s.duration >= b - 1 && s.duration <= b - a + 3);
+    for (const l of rec.loafs) {
+      const page = (l.all || []).filter((s) => !own(s));
+      l.forced = page.reduce((n, s) => n + s.forced, 0);
+      l.scripts = page
+        .slice()
+        .sort((a, b) => b.duration - a.duration)
+        .slice(0, 2)
+        .map((s) => ({ duration: Math.round(s.duration), forced: Math.round(s.forced), name: s.name, source: s.source }));
+    }
     const slow = rec.loafs.filter((l) => l.duration >= T.slowFrame);
     if (slow.length) {
       const worst = slow.reduce((a, b) => (b.duration > a.duration ? b : a));
+      // The script that forced the most layout, which may not be the longest one.
+      const thrash = worst.scripts.slice().sort((a, b) => b.forced - a.forced)[0];
       findings.push({
         type: 'slow-frame',
         f: frameAt(rec, worst.t),
         amount: worst.duration,
         count: slow.length,
         script: scriptName(worst.scripts[0]),
+        forced: worst.forced >= T.forcedLayout ? worst.forced : 0,
+        forcedBy: worst.forced >= T.forcedLayout && thrash && thrash !== worst.scripts[0] ? scriptName(thrash) : '',
+      });
+    }
+
+    // Inputs that took too long to show anything. The response is the first frame after the
+    // input in which something visibly changed that wasn't already changing in the second
+    // before it: a ticking clock, a running transition or a scroll in progress isn't a
+    // response. It has to come before the next input and within 3s.
+    const changers = rec.frames.map(() => []);
+    const shownRow = (r) => !!r && r[R] === 1 && r[O] > 0 && r[A] > 0;
+    for (const tr of rec.tracks.values()) {
+      if (!tr.paints || tr.skip) continue;
+      let prev = null;
+      for (const r of tr.rows) {
+        if (r[F_] > 0 && r[F_] < F && (shownRow(r) || shownRow(prev))) changers[r[F_]].push(tr);
+        prev = r;
+      }
+    }
+    for (const sc of [rec.win, ...rec.scrollers.values()]) if (sc) for (const r of sc.rows.slice(1)) if (r[0] < F) changers[r[0]].push(sc);
+    rec.mutations.forEach((m, f) => {
+      if (m && f < F) for (const el of m.text) if (el.isConnected && inRoots(rec, el) && !ignoredEl(rec, el)) changers[f].push(el);
+    });
+    const lastSampleBy = (t) => {
+      let f = -1;
+      while (f + 1 < F && rec.sampledAt[f + 1] <= t) f++;
+      return f;
+    };
+    for (let i = 0; i < rec.inputs.length; i++) {
+      const inp = rec.inputs[i];
+      const next = rec.inputs[i + 1];
+      const fIn = lastSampleBy(inp.start);
+      const busy = new Set();
+      for (let f = fIn; f >= 0 && rec.sampledAt[f] >= inp.start - 1000; f--) for (const c of changers[f]) busy.add(c);
+      let resp = -1;
+      for (let f = fIn + 1; f < F; f++) {
+        if ((next && rec.sampledAt[f] > next.start) || rec.sampledAt[f] - inp.end > 3000) break;
+        if (changers[f].some((c) => !busy.has(c))) {
+          resp = f;
+          break;
+        }
+      }
+      if (resp < 0) continue;
+      // Timed to when the frame was sampled, just after it painted. A frame's rAF timestamp
+      // can be far earlier than its paint when the main thread was blocked.
+      const shown = rec.sampledAt[resp];
+      const delay = Math.max(0, shown - inp.end);
+      if (delay < T.slowResponse) continue;
+      // A slow frame in between is why: the main thread couldn't render the response.
+      const blocked = rec.loafs
+        .filter((l) => l.t < shown && l.t + l.duration > inp.end && l.duration >= T.slowFrame)
+        .sort((a, b) => b.duration - a.duration)[0];
+      findings.push({
+        type: 'slow-response',
+        f: frameAt(rec, inp.end),
+        amount: delay,
+        input: inp.input,
+        el: null,
+        target: inp.target,
+        cause: blocked
+          ? { text: `main thread busy for ${Math.round(blocked.duration)}ms${blocked.scripts[0] ? ` in ${scriptName(blocked.scripts[0])}` : ''}`, sure: true }
+          : '',
       });
     }
 
@@ -1198,7 +1349,7 @@
       const key = idOf(info.target) + layout.join();
       if (seenAnim.has(key)) continue;
       seenAnim.add(key);
-      findings.push({ type: 'layout-anim', f: info.f, props: layout, el: info.target });
+      findings.push({ type: 'layout-anim', f: info.f, props: layout, el: info.target, animation: animLabel(info, info.target) });
     }
 
     // While a View Transition runs, the screen shows its ::view-transition pseudo-elements
@@ -1239,11 +1390,22 @@
         : null,
       loops: loops.filter((t) => !loops.some((o) => o.el !== t.el && o.el.contains(t.el))).slice(0, 5).map(descOf),
       layoutShifts: rec.layoutShifts.map((l) => ({ ...l, t: Math.round(l.t), value: round(l.value, 4) })),
-      slowFrames: rec.loafs.map((l) => ({ ...l, t: Math.round(l.t), duration: Math.round(l.duration) })),
+      slowFrames: rec.loafs.map(({ all, ...l }) => ({ ...l, t: Math.round(l.t), duration: Math.round(l.duration), forced: Math.round(l.forced || 0) })),
+      inputs: rec.inputs.map((i) => ({ input: i.input, target: i.target, start: Math.round(i.start), end: Math.round(i.end) })),
       animations: [...rec.anims.values()]
         .filter((i) => i.target && i.target.nodeType === 1)
         .slice(0, 50)
-        .map((i) => ({ element: describe(i.target), kind: i.kind, props: i.props, duration: i.duration, infinite: i.infinite, t: Math.round(rec.frames[i.f] || 0) })),
+        .map((i) => ({
+          element: describe(i.target) + i.pseudo,
+          kind: i.kind,
+          name: i.label,
+          props: i.props,
+          duration: i.duration,
+          delay: i.delay,
+          easing: i.easing,
+          infinite: i.infinite,
+          t: Math.round(rec.frames[i.f] || 0),
+        })),
     };
     for (const x of out) result.counts[x.severity]++;
     if (rec.status === 'timeout') {
@@ -1263,6 +1425,29 @@
   }
 
   const scriptName = (sc) => (!sc ? '' : sc.name ? `${sc.name}${sc.source ? ` (${sc.source})` : ''}` : sc.source);
+
+  // "transition transform 300ms ease-out on div.card": enough to find it in the CSS or code.
+  function animLabel(info, el) {
+    const ms = (n) => (typeof n === 'number' && isFinite(n) ? `${Math.round(n)}ms` : '');
+    const parts = [info.label, ms(info.duration), info.delay ? `after ${ms(info.delay)}` : '', info.easing];
+    const on = info.target !== el || info.pseudo ? ` on ${describe(info.target)}${info.pseudo}` : '';
+    return parts.filter(Boolean).join(' ') + on;
+  }
+
+  // The animation that was moving this element (or an ancestor) around frame f, if any:
+  // the closest one to the element wins.
+  // ::before / ::after animations move only the pseudo-element, so they're left out.
+  function animFor(rec, el, f, type) {
+    const props = FADES.has(type) ? FADE_PROPS : MOVE_PROPS;
+    let best = null;
+    for (const info of rec.anims.values()) {
+      const t = info.target;
+      if (info.infinite || info.scrollDriven || info.pseudo || !t || t.nodeType !== 1 || !t.contains(el)) continue;
+      if (f < info.f - 1 || f > info.lastF + 1 || !info.props.some((p) => props.test(p))) continue;
+      if (!best || (best.target !== t && best.target.contains(t)) || (best.target === t && info.f > best.f)) best = info;
+    }
+    return best ? animLabel(best, el) : '';
+  }
 
   const firstFrameOf = (rec) => {
     let min = Infinity;
@@ -1309,6 +1494,8 @@
         return n >= 4 ? 'medium' : 'low';
       case 'slow-frame':
         return n >= 100 ? 'medium' : 'low';
+      case 'slow-response':
+        return n >= 300 ? 'medium' : 'low';
       default:
         return 'low';
     }
@@ -1359,7 +1546,13 @@
       case 'scroll-fight':
         return `scroll changed direction ${x.count} time${x.count > 1 ? 's' : ''} (±${px(n)}): two things scrolling it?`;
       case 'slow-frame':
-        return `${x.count} slow frame${x.count > 1 ? 's' : ''}, longest ${Math.round(n)}ms${x.script ? ' in ' + x.script : ''}`;
+        return `${x.count} slow frame${x.count > 1 ? 's' : ''}, longest ${Math.round(n)}ms${x.script ? ' in ' + x.script : ''}${
+          x.forced
+            ? `; ${Math.round(x.forced)}ms of it forced layout${x.forcedBy ? ` in ${x.forcedBy}` : ''} (layout read after a style change, often in a loop)`
+            : ''
+        }`;
+      case 'slow-response':
+        return `took ${Math.round(n)}ms to show any response to the ${x.input} (nothing moved, appeared, faded or changed text before then)`;
       case 'layout-anim':
         return `animates ${x.props.join(', ')}, which runs layout every frame`;
       default:
@@ -1437,14 +1630,14 @@
     const list = [...groups.values()].map((x) => {
       const sev = severity(x, T);
       const t = Math.round(rec.frames[x.f] || 0);
-      let element = x.tr ? descOf(x.tr) : x.el ? describe(x.el) : x.scroller || 'page';
+      let element = x.tr ? descOf(x.tr) : x.el ? describe(x.el) : x.scroller || x.target || 'page';
       if (x.inserted && x.n > 1) {
         element = `${describe(x.inserted)} (${x.n} elements)`;
         const r = x.inserted.getBoundingClientRect();
         if (x.inserted.isConnected && r.width) Object.assign(x, { w: r.width, h: r.height });
       } else if (x.n > 1) element += ` ×${x.n}`;
       const moving = new Set(kept.filter((k) => k.f === x.f && k.tr).map((k) => k.tr));
-      const c = x.type === 'shift' || x.type === 'blip' ? causeAt(rec, x.f, S, sizeChanged, moving) : '';
+      const c = x.cause || (x.type === 'shift' || x.type === 'blip' ? causeAt(rec, x.f, S, sizeChanged, moving) : '');
       return {
         severity: sev,
         type: x.type,
@@ -1456,6 +1649,7 @@
         message: message(x),
         cause: typeof c === 'string' ? c : c.text,
         causeSure: typeof c === 'string' ? !!c : c.sure,
+        animation: x.animation || (x.tr && MOTION.has(x.type) ? animFor(rec, x.tr.el, x.f, x.type) : '') || undefined,
         amount: x.amount != null ? round(x.amount, 1) : undefined,
       };
     });
@@ -1666,7 +1860,7 @@
     const line = (x) =>
       `${x.severity.toUpperCase().padEnd(6)} ${('+' + x.t + 'ms').padEnd(8)} ${x.element} — ${x.message}${
         x.cause ? ` [${x.causeSure === false ? 'same frame' : 'cause'}: ${x.cause}]` : ''
-      }`;
+      }${x.animation ? ` [animation: ${x.animation}]` : ''}`;
     const defects = fs.filter((x) => x.group !== 'unanimated');
     const unanimated = fs.filter((x) => x.group === 'unanimated');
     let shown = 0;
@@ -1697,9 +1891,12 @@
   // Holds settling until the action has finished, so a multi-step action is recorded whole.
   async function record(action, opts) {
     const done = start({ ...(opts || {}), hold: true });
+    const rec = current;
+    if (rec) rec.synthetic = true; // the action's own el.click() is the interaction
     try {
       if (typeof action === 'function') await action();
     } finally {
+      if (rec) rec.synthetic = false;
       release();
     }
     return done;

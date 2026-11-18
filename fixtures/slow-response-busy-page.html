@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px/1.4 system-ui,sans-serif}.box{width:160px;height:96px;background:#4a7dff;color:#fff}.row{height:40px;margin:4px 16px;background:#dde5ff}</style><script src="_lib.js"></script>
+<title>planted: the click's result comes 300ms later; a ticking clock and a change outside the root don't count as the response</title>
+<body><aside id="side" class="row" style="width:200px">idle</aside><main><button id="btn" class="box">Load</button><div id="out"></div></main><div class="row" id="clock" style="width:120px">0</div>
+<script>
+OPTIONS = { root: "main" };
+EXPECT = { has: ["slow-response"], allow: ["pop-in"], message: "to the click" };
+let n = 0;
+setInterval(() => (clock.textContent = String(++n % 10)), 150);
+btn.addEventListener("click", () => {
+  setTimeout(() => (side.textContent = "busy"), 40);
+  setTimeout(() => (out.innerHTML = '<div class="row">result</div>'), 300);
+});
+trigger = async () => {
+  await new Promise((r) => setTimeout(r, 300));
+  btn.click();
+  await new Promise((r) => setTimeout(r, 400));
+};
+</script>

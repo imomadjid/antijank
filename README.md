@@ -11,12 +11,14 @@ Catch the one-frame UI glitches your coding agent can't see.
   <img alt="Seven frames of a card sliding down. In frame 4 it lands 38px below its path for one frame, then snaps back. antijank reports it as a HIGH blip." src="https://raw.githubusercontent.com/imomadjid/antijank/main/assets/hero-light.svg" width="100%">
 </picture>
 
+Chrome's own tools tell you why a frame was slow. None of them tell you that a card sat 38px out of place for one frame, which element pushed it, or let you fail a build on it. antijank does, as a few lines of text your agent can act on, with nothing to install if your agent already drives a browser.
+
 Agents check UI with screenshots, and jank lives between them. A card that lands in the wrong place for one frame, a banner that shoves a list down 44px, a fade that never ran: each lasts about 16ms and is gone before the next screenshot.
 
 antijank records every element's position and opacity on every frame of an interaction in a real browser, and reports what went wrong in a few lines of text:
 
 ```text
-antijank 0.1.0 · settled after 343ms · 22 frames · 7 elements · probe 0.34ms/frame
+antijank 0.2.0 · settled after 343ms · 22 frames · 7 elements · probe 0.34ms/frame
 HIGH   +10ms    div.row "a" ×4 — moved down 44px in one frame, with no transition [cause: div#banner inserted (1248×40)]
 unanimated, fine if instant is intended (tabs, menus, frequent or keyboard-driven UI):
   MEDIUM +10ms    div#banner — appeared at full opacity with no fade (1248×40)
@@ -49,7 +51,9 @@ Or as a Claude Code plugin:
 /plugin install antijank@antijank
 ```
 
-Recording needs Playwright's Chromium in the project you're testing, and Node 22+ to run the runner, whatever the project itself uses. Add Playwright with the project's own package manager:
+Nothing else is needed if your agent already drives a browser through Chrome DevTools MCP, Playwright MCP, or a browser pane or extension that runs JavaScript. The skill loads the probe into that browser, signed in as you are, and adds nothing to your project.
+
+To record headless, in CI, or at normal speed, slow CPU and reduced motion in one command, the runner needs Playwright's Chromium in the project you're testing and Node 22+, whatever the project itself uses. Add Playwright with the project's own package manager:
 
 | Lockfile | Add Playwright | Download Chromium |
 | --- | --- | --- |
@@ -59,7 +63,7 @@ Recording needs Playwright's Chromium in the project you're testing, and Node 22
 | `deno.lock` | `deno add npm:playwright`, with `"nodeModulesDir": "auto"` in `deno.json` | `deno run -A npm:playwright install chromium` |
 | `package-lock.json` | `npm i -D playwright` | `npx playwright install chromium` |
 
-The skill tells your agent to do the same, after asking you.
+The skill tells your agent to do the same when it needs the runner, after asking you.
 
 ## Use
 
@@ -88,10 +92,13 @@ Defects, listed first:
 | `resettle` / `overshoot` | Moved again after resting, or went well past its target |
 | `stretch` | Text scaled unevenly during a scale animation |
 | `scroll-jump` / `scroll-fight` | Scroll position jumped, or kept changing direction |
-| `slow-frame` | A frame took 50ms or more, with the script responsible |
+| `slow-frame` | A frame took 50ms or more, with the script responsible and how much of it was forced layout |
+| `slow-response` | A click or key press showed nothing for 100ms or more |
 | `layout-anim` | An animation drives width, height, top or margin, so layout runs every frame |
 
 Unanimated changes, listed apart: `pop-in`, `pop-out`, `swap` and `opacity-snap` mean something changed with no transition. That's often right: tabs, menus and anything frequent or keyboard-driven should be instant. Pin what you want with an expectation instead of adding animation to clear a finding.
+
+Motion findings name the animation that was moving the element, such as `[animation: transition transform 300ms ease-out]`, so your agent goes straight to the rule that needs fixing.
 
 Expectations turn a recording into a test. `moves`, `still`, `fadesIn`, `fadesOut` and `noFindings` pass or fail, and the runner exits 1 on a failure. See [SKILL.md](https://github.com/imomadjid/antijank/blob/main/skills/antijank/SKILL.md) for the full list and the usual cause of each finding.
 
@@ -116,7 +123,7 @@ npx antijank http://localhost:3000 --click "#compose" --fail-on high \
 
 `pnpm dlx antijank`, `yarn dlx antijank` and `bunx antijank` work the same way. Run `npx antijank --help` for every option. Findings alone don't fail a run; pass `--fail-on` or `--expect` for that. The installed skill carries the same runner at `scripts/run.mjs`, which is what your agent runs.
 
-Or load `scripts/probe.js` into a page you already drive, such as Playwright, Puppeteer, a DevTools console or a browser MCP:
+Or load `scripts/probe.js` into a page you already drive, such as Playwright, Puppeteer, a DevTools console or a browser MCP. `scripts/probe.min.js` (42KB) is the same probe for tools that only take JavaScript text; SKILL.md has a loader that fetches it from jsDelivr, pinned to one version with an integrity hash:
 
 ```js
 await antijank.record(() => document.querySelector('#compose').click(), { root: 'main' });
@@ -141,14 +148,14 @@ The probe's own cost per frame is in the header line: roughly 4–8ms per 1,000 
 
 ## What it can't see
 
-- **Inside `<canvas>` and WebGL**, and paint-only changes such as a colour flash with no change in box or opacity.
+- **Inside `<canvas>` and WebGL**, and paint-only changes such as a colour flash with no change in box or opacity. A button whose only feedback is a colour change can get a `slow-response` it doesn't deserve.
 - **`clip-path`, masks, and elements covered by others.** Clipping by overflow is taken into account.
 - **What the compositor shows during a main-thread stall.** CSS and Web Animations of transform and opacity keep moving on screen while the main thread is blocked; the probe only sees where they got to. Jumps right after a slow frame on those elements are left out, and the slow frame is reported.
 - **View Transitions.** The morph runs in `::view-transition` pseudo-elements. The report says when one ran and leaves out element findings from that window.
 - **Inside shadow DOM, iframes and `<svg>`.** The host, frame or `<svg>` box is watched, not what's inside it.
 - **Virtualized lists.** Recycled rows can look like jumps; scope `root` away from them.
 - **Browsers other than Chromium**, so Safari- and Firefox-only jank is out of reach.
-- **Pages with a strict Content-Security-Policy**, when you inject the probe yourself. The runner turns CSP off for its own browser.
+- **Script tags on pages with a strict Content-Security-Policy.** Load the probe through DevTools evaluation instead, which CSP doesn't block, or use the runner, which turns CSP off for its own browser.
 - **Hidden tabs and panes.** Browsers pause frames there, so the probe refuses to record rather than return nothing.
 - **Exact timing.** Headless timing is close to a real display but not identical.
 
@@ -159,7 +166,8 @@ The browser's layout-shift entries are kept in the JSON result for reference; th
 ```bash
 pnpm install
 pnpm exec playwright install chromium
-pnpm test              # every fixture in fixtures/ plus the runner
+pnpm build             # rebuild scripts/probe.min.js after changing probe.js
+pnpm test              # every fixture in fixtures/, the runner and the build
 FIXTURE=flip pnpm test
 ```
 

@@ -127,7 +127,12 @@ async function act(page, step, base) {
   const at = (u) => new URL(u, base).href;
   if (step.goto) await page.goto(at(step.goto), { waitUntil: 'load' });
   else if (step.reload) await page.reload({ waitUntil: 'load' });
-  else if (step.click) await page.click(step.click);
+  else if (step.click) {
+    // Hover first, as a person does, so hover styles start before the press, not with it.
+    await page.hover(step.click);
+    await page.waitForTimeout(150);
+    await page.click(step.click);
+  }
   else if (step.hover) await page.hover(step.hover);
   else if (step.fill) await page.fill(step.fill[0], step.fill[1]);
   else if (step.type) await page.locator(step.type[0]).pressSequentially(step.type[1]);

@@ -2,7 +2,7 @@
 <title>planted: 120ms of script blocks a transition</title>
 <body><div class="box" id="card" style="margin:20px;transition:transform .4s linear"></div>
 <script>
-EXPECT = { has: ["slow-frame"], allow: ["jump", "shift"] };
+EXPECT = { has: ["slow-frame"], allow: ["jump", "shift"], notMessage: "forced layout" };
 trigger = async () => {
   card.style.transform = "translateX(300px)";
   await frames(3);

@@ -40,7 +40,7 @@ def svg(dark):
     ry = y0 + th + 48
     o.append(f'<rect x="48" y="{ry}" width="{W-96}" height="80" rx="10" fill="{c["panel"]}" stroke="{c["line"]}"/>')
     lines = [
-        (c['muted'], 'antijank 0.1.0 · settled after 480ms · 31 frames · 4 elements · probe 0.26ms/frame'),
+        (c['muted'], 'antijank 0.2.0 · settled after 480ms · 31 frames · 4 elements · probe 0.26ms/frame'),
         (c['bad'], 'HIGH   +47ms    div#card — was 38px down of its place for 1 frame, then snapped back'),
     ]
     for k, (col, t) in enumerate(lines):

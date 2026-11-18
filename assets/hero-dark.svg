@@ -34,6 +34,6 @@
 <rect x="808" y="179.6" width="80" height="40" rx="6" fill="#4c8dff" opacity="0.9"/>
 <text x="848.0" y="298" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#8b949e">frame 7</text>
 <rect x="48" y="324" width="864" height="80" rx="10" fill="#161b22" stroke="#30363d"/>
-<text x="68" y="354" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#8b949e" xml:space="preserve">antijank 0.1.0 · settled after 480ms · 31 frames · 4 elements · probe 0.26ms/frame</text>
+<text x="68" y="354" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#8b949e" xml:space="preserve">antijank 0.2.0 · settled after 480ms · 31 frames · 4 elements · probe 0.26ms/frame</text>
 <text x="68" y="378" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#ff7b72" xml:space="preserve">HIGH   +47ms    div#card — was 38px down of its place for 1 frame, then snapped back</text>
 </svg>

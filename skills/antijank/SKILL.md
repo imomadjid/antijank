@@ -1,6 +1,6 @@
 ---
 name: antijank
-description: Catches one-frame UI glitches that screenshots miss. Records every element's position and opacity on every frame of an interaction in a real browser and reports, as a few lines of text, what jumped, flashed, popped in without a fade, pushed its neighbours, reversed, flickered or scrolled abruptly. Use it when the user reports that something "jumps", "flashes", "flickers", "snaps", "shifts" or "feels janky"; after writing or changing an animation or transition (FLIP, layout or shared-element animations, accordions, toasts, modals, list inserts, chat messages); and to confirm a motion fix worked before calling it done.
+description: Catches one-frame UI glitches that screenshots miss. Records every element's position and opacity on every frame of an interaction in a real browser and reports, as a few lines of text, what jumped, flashed, popped in without a fade, pushed its neighbours, reversed, flickered, scrolled abruptly or responded slowly to a click. Runs in the browser you already drive (Chrome DevTools MCP, Playwright MCP) with nothing to install, or headless through its runner. Use it when the user reports that something "jumps", "flashes", "flickers", "snaps", "shifts" or "feels janky"; after writing or changing an animation or transition (FLIP, layout or shared-element animations, accordions, toasts, modals, list inserts, chat messages); and to confirm a motion fix worked before calling it done.
 ---
 
 # antijank
@@ -11,7 +11,45 @@ It reports facts ("moved down 44px in one frame"), not taste. Judging whether a 
 
 ## Pick how to run it
 
-**A. The runner** (needs a shell, Node 22+ and Playwright in the project). Best default: headless, repeatable, can slow the CPU and emulate reduced motion.
+`<skill-dir>` below is this skill's folder (where this file is).
+
+**A. The browser you already drive: nothing to install.** If you have a browser tool (Chrome DevTools MCP, Playwright MCP, or a browser pane or extension that runs JavaScript), load the probe into the page you're testing. It keeps that browser's sign-in and adds nothing to the project.
+
+| Your tool | Load the probe |
+| --- | --- |
+| Chrome DevTools MCP | `evaluate_script` with `sourcePath: "<skill-dir>/scripts/probe.js"` and `format: "script"` |
+| Playwright MCP | `browser_run_code` (`browser_run_code_unsafe` in some versions): `async (page) => { await page.addScriptTag({ path: '<skill-dir>/scripts/probe.js' }) }` |
+| A Playwright `page` in your own script | `await page.addScriptTag({ path: '<skill-dir>/scripts/probe.js' })` |
+| A tool that only evaluates JavaScript text | Evaluate the CDN loader below. If it's blocked, evaluate the contents of `scripts/probe.min.js` (42KB) instead |
+
+The CDN loader fetches this exact version, and the integrity hash makes the browser reject any other file:
+
+```js
+await new Promise((ok, fail) => {
+  const s = document.createElement('script');
+  s.src = 'https://cdn.jsdelivr.net/npm/antijank@0.2.0/skills/antijank/scripts/probe.min.js';
+  s.integrity = 'sha384-gbt1FS2nRYbhwU3zqdkxuKbH6++BQeLIjkpVPLNNOwbu361o2lV0U6li+N879FDf';
+  s.crossOrigin = 'anonymous';
+  s.onload = ok;
+  s.onerror = () => fail(new Error('antijank: CDN script blocked (Content-Security-Policy or offline)'));
+  document.head.append(s);
+});
+```
+
+- Loading is safe to repeat on the same page, and needed again after every navigation.
+- A strict Content-Security-Policy blocks script tags, so the CDN loader and `addScriptTag` fail on such pages. Evaluating the file's contents through DevTools (`evaluate_script` with `sourcePath`, or pasting `probe.min.js`) is not blocked.
+- The tab has to be visible. Browsers pause frames in hidden tabs and panes, and the probe then refuses to record (`status: hidden`).
+- Slow the CPU and turn on reduced motion with the same tool. In DevTools MCP, call `emulate` with `cpuThrottlingRate: 4`, then with `prefersReducedMotion: "reduce"`; each call replaces the last, and an empty call resets. In Playwright MCP, use `browser_emulate_media` with `reducedMotion: "reduce"`, and for the CPU run `const s = await page.context().newCDPSession(page); await s.send('Emulation.setCPUThrottlingRate', { rate: 4 })`.
+- To record a page load, the probe has to run before the page's own scripts. With Playwright, add two init scripts, then load the page and wait for the result:
+  ```js
+  await page.addInitScript({ path: '<skill-dir>/scripts/probe.js' });
+  await page.addInitScript(() => antijank.start({ root: 'main' }));
+  await page.goto(url);
+  const result = await page.evaluate(() => antijank.wait());
+  ```
+  Other tools: use the runner (B), which records the load by default.
+
+**B. The runner: for CI, page loads and the whole matrix in one command.** It needs a shell, Node 22+ and Playwright in the project, and runs headless with its own Chromium, so it's repeatable.
 
 ```bash
 node <skill-dir>/scripts/run.mjs http://localhost:3000/inbox --click "button[aria-label='Compose']" --root main
@@ -19,7 +57,7 @@ node <skill-dir>/scripts/run.mjs http://localhost:3000 --steps steps.json --matr
 node <skill-dir>/scripts/run.mjs http://localhost:3000/settings            # records the page load
 ```
 
-`<skill-dir>` is this skill's folder (where this file is). The runner is Chromium-only and runs on Node, whatever the project uses. If the project has no Playwright, the runner says so. Add it with the package manager the project already uses (look at the lockfile), then download Chromium:
+The runner is Chromium-only and runs on Node, whatever the project uses. If the project has no Playwright, the runner says so. Add it with the package manager the project already uses (look at the lockfile), then download Chromium:
 
 | Lockfile | Add Playwright | Download Chromium |
 | --- | --- | --- |
@@ -29,20 +67,9 @@ node <skill-dir>/scripts/run.mjs http://localhost:3000/settings            # rec
 | `deno.lock` | `deno add npm:playwright` (with `"nodeModulesDir": "auto"` in `deno.json`, so Node can find it) | `deno run -A npm:playwright install chromium` |
 | `package-lock.json` or none | `npm i -D playwright` | `npx playwright install chromium` |
 
-Ask before adding a dependency to someone else's project. Run `node <skill-dir>/scripts/run.mjs --help` for every option.
+Ask before adding a dependency to someone else's project; option A needs none. Run `node <skill-dir>/scripts/run.mjs --help` for every option. The runner turns Content-Security-Policy off for its own browser.
 
-**B. A browser you already drive** (Playwright MCP, Chrome DevTools MCP, any tool that runs JavaScript in the page). Load the probe, then record around the action:
-
-- With Playwright's `page` object: `await page.addScriptTag({ path: '<skill-dir>/scripts/probe.js' })`.
-- To record a page load, the probe has to start before the page's own scripts. Add two init scripts, then load the page and wait for the result:
-  ```js
-  await page.addInitScript({ path: '<skill-dir>/scripts/probe.js' });
-  await page.addInitScript(() => antijank.start({ root: 'main' }));
-  await page.goto(url);
-  const result = await page.evaluate(() => antijank.wait());
-  ```
-- With only "evaluate JavaScript": evaluate the contents of `scripts/probe.js` once per page (it is safe to load twice).
-- A strict Content-Security-Policy can block the injected script. Use the runner, which turns CSP off for its own browser, or create the Playwright context with `bypassCSP: true`.
+## Recording
 
 When the action can run inside the page:
 
@@ -62,6 +89,8 @@ await antijank.release(); // 3. evaluate: settles after the last step, resolves 
 antijank.report();
 ```
 
+Hover an element before clicking it (DevTools MCP `hover`, Playwright MCP `browser_hover`), as a person does, and start the recording a second or more before the first input. A click that jumps straight onto an element starts its hover effects with the press, and something that updates on its own (a clock, a live counter) needs that second to be recognised as already changing; either can otherwise be taken for the click's response. The runner hovers before every click.
+
 Without `hold`, the recording settles as soon as nothing has moved for about 330ms, which can fall between two of your steps. A hold that is never released ends with an error after `holdTimeout` (60s by default). `antijank.wait()` resolves with the result once the recording ends; `antijank.stop()` ends it at once.
 
 ## Workflow
@@ -71,7 +100,7 @@ Without `hold`, the recording settles as soon as nothing has moved for about 330
 3. **Record and read the report.** Severity is a starting point: HIGH is almost always visible, LOW is often fine.
 4. **Decide which findings are intended.** Unanimated changes are listed apart from defects. Instant is a valid choice for tabs, menus, tooltips and anything frequent or keyboard-driven, so don't add animation just to clear a finding. Pin the intended behaviour with an expectation, or mark the element `data-antijank-ignore`.
 5. **Write expectations for what should happen** (below) and rerun with them. This turns "looks fine" into pass/fail, and the same spec can guard against regressions later.
-6. **Fix the defects, then rerun.** Use `--matrix` for the final check. It runs at normal speed, with the CPU slowed 4× and with reduced motion, because timing bugs (a slow first frame eating an animation, a late transform) often appear only when the CPU is slow.
+6. **Fix the defects, then rerun.** For the final check, record at normal speed, with the CPU slowed 4× and with reduced motion (`--matrix` in the runner, or the emulation calls in A), because timing bugs (a slow first frame eating an animation, a late transform) often appear only when the CPU is slow.
 7. **Report with numbers**, for example "composer moves 245 → 562px over 170ms, nothing else moves more than 1px, 0 findings in all three conditions".
 
 ## Findings and their usual causes
@@ -93,8 +122,11 @@ Without `hold`, the recording settles as soon as nothing has moved for about 330
 | `overshoot` | Went well past its target | Spring bounce higher than intended. Ignore it if the bounce is deliberate |
 | `stretch` | Text scaled unevenly | Scale animation on a box with text; counter-scale its children or animate size |
 | `scroll-jump` / `scroll-fight` | Scroll position jumped or changed direction | Programmatic scroll without smoothing, scroll anchoring, or two followers |
-| `slow-frame` | A frame took 50ms or more | Main-thread work during the animation (the script is named) |
+| `slow-frame` | A frame took 50ms or more | Main-thread work during the animation (the script is named). "Forced layout" means a script read layout (`offsetHeight`, `getBoundingClientRect`) right after changing styles, usually in a loop: read everything first, then write |
+| `slow-response` | A click, Enter, Space or Escape showed nothing for 100ms or more | No pressed or pending state while work or a request runs. Show one at once. `[cause: main thread busy …]` means a slow handler kept the response from painting |
 | `layout-anim` | Animates width, height, top, margin and similar | Runs layout every frame. Fine for small accordions; prefer transforms for big or frequent motion |
+
+Motion findings name the animation that was moving the element, or an ancestor, at that frame: `[animation: transition transform 300ms ease-out]`, `[animation: animation slide-in 400ms ease on div.panel]` or `[animation: Web Animation of opacity, transform 200ms linear]`. Go to that rule or call first. No animation named usually means the motion is driven by script (requestAnimationFrame, a spring library) or isn't animated at all.
 
 ## Expectations
 
@@ -126,13 +158,14 @@ Pass `expect` (option or `--expect`) to get pass/fail lines and exit code 1 on f
 - Only elements that draw something (text, background, border, shadow, backdrop filter, `::before`/`::after` content, images, form controls) can produce findings. Transparent wrappers stay silent, so their painted children report instead.
 - Infinite CSS and Web Animations (spinners, shimmer) are ignored automatically. A JavaScript loop that never stops (a ticker) makes the recording time out; elements whose own position or opacity changed in most frames (for at least 60 frames) are then left out and listed as loops. Their parents and children are still judged on their own. Mark anything else with `data-antijank-ignore`.
 - At most 1500 elements are watched from the start, plus 1000 added during the recording. Past that the report warns that findings may be missing; narrow `root`.
+- A recording settles about 330ms after the last change, so a response slower than that falls outside it and isn't measured. For slow actions (network, heavy work), add a `wait` step after the click or pass `waitFor` with a selector for the result.
 - Streaming text grows continuously, so expect `shift` findings caused by "grew taller (text changed)". Judge whether that growth should be smoothed.
 - The header line shows the probe's cost per frame: roughly 4–8ms per 1000 elements on a fast laptop, more with the CPU slowed. Reading layout after every frame can disturb a page that is already near its frame budget, so if the cost is above about 4ms, narrow `root`.
 - Thresholds can be overridden: `{ thresholds: { shift: 4, popArea: 1000 } }` (see `antijank.thresholds`).
 
 ## What it can't see
 
-- Pixels inside `<canvas>` or WebGL, and paint-only changes (a colour flash with no box or opacity change).
+- Pixels inside `<canvas>` or WebGL, and paint-only changes (a colour flash with no box or opacity change). For the same reason, a control whose only feedback is a colour change can get a `slow-response` it doesn't deserve: check whether it changes colour on press.
 - Clipping by `clip-path` or masks, and elements covered by others. Clipping by overflow is taken into account, including absolute and fixed elements that escape it because their containing block is further out.
 - Inside shadow DOM and iframes: the shadow host and the `<iframe>` box are watched, not their contents. Load the probe inside the frame to record it.
 - Shapes inside an `<svg>`: only the `<svg>` box is watched.

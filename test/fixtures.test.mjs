@@ -1,8 +1,8 @@
 // Runs every fixture page: planted jank must be found, clean pages must stay silent.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync } from 'node:fs';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { readdirSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { chromium } from 'playwright';
 
@@ -10,6 +10,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const probe = join(root, 'skills/antijank/scripts/probe.js');
 const fixtures = readdirSync(join(root, 'fixtures')).filter((f) => f.endsWith('.html')).sort();
 const only = process.env.FIXTURE;
+const ORIGIN = 'http://fixtures.test';
 
 let browser;
 before(async () => {
@@ -24,7 +25,13 @@ for (const name of fixtures) {
   test(name, async () => {
     const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
     try {
-      await page.goto(pathToFileURL(join(root, 'fixtures', name)).href);
+      // Served over http: Chromium leaves scripts out of long-animation-frame entries on
+      // file:// pages, so attribution (slow frames, forced layout) is only testable this way.
+      await page.route(`${ORIGIN}/**`, (route) => {
+        const file = new URL(route.request().url()).pathname.slice(1);
+        route.fulfill({ body: readFileSync(join(root, 'fixtures', file)), contentType: file.endsWith('.js') ? 'text/javascript' : 'text/html' });
+      });
+      await page.goto(`${ORIGIN}/${name}`);
       await page.addScriptTag({ path: probe });
       const { result, report, expect } = await page.evaluate(async () => {
         const result = await window.antijank.record(() => window.trigger(), window.OPTIONS || {});
@@ -32,7 +39,7 @@ for (const name of fixtures) {
         return {
           result,
           report: window.antijank.report(),
-          expect: { ...e, cause: e.cause ? e.cause.source : null },
+          expect: { ...e, cause: e.cause ? e.cause.source : null, animation: e.animation ? e.animation.source : null },
         };
       });
       const types = result.findings.map((f) => f.type);
@@ -53,6 +60,12 @@ for (const name of fixtures) {
         assert.equal(e.pass, !failing.has(e.name), `expectation ${e.pass ? 'passed' : 'failed'}: ${e.name}: ${e.detail}${why}`);
       if (expect.message)
         assert.ok(result.findings.some((f) => f.message.includes(expect.message)), `expected a message with "${expect.message}"${why}`);
+      if (expect.notMessage)
+        assert.ok(!result.findings.some((f) => f.message.includes(expect.notMessage)), `expected no message with "${expect.notMessage}"${why}`);
+      if (expect.animation) {
+        const re = new RegExp(expect.animation);
+        assert.ok(result.findings.some((f) => re.test(f.animation || '')), `expected an animation matching ${re}${why}`);
+      }
       if (expect.count != null) assert.equal(types.length, expect.count, `expected ${expect.count} finding(s)${why}`);
       if (expect.loops) assert.ok((result.loops || []).length > 0, `expected a loop to be left out${why}`);
       if (expect.cause) {

@@ -75,3 +75,21 @@ for (const cpu of ['1', '4']) {
     assert.match(r.stdout, /snapped back \(cpu×\d 3\/3\)|snapped back \(normal 3\/3\)/);
   });
 }
+
+test('a real click that shows nothing for 250ms is a slow response', () => {
+  const r = run(fixture('slow-response.html'), '--click', '#btn');
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /button#btn — took \d+ms to show any response to the click/);
+});
+
+test('a real click answered at once is not a slow response', () => {
+  const r = run(fixture('clean-fast-response.html'), '--click', '#btn');
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stdout, /response/);
+});
+
+test('a hover transition under the pointer does not hide a slow response', () => {
+  const r = run(fixture('slow-response-hover.html'), '--click', '#btn');
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /took \d+ms to show any response to the click/);
+});

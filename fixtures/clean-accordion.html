@@ -2,7 +2,7 @@
 <title>clean: panel opens and pushes rows smoothly</title>
 <body><div class="row">header</div><div id="panel" style="height:0;overflow:hidden;opacity:0"><p style="margin:8px 16px">Panel text that is revealed while the panel opens.</p></div><div class="row"></div><div class="row"></div>
 <script>
-EXPECT = { has: ["layout-anim"], allow: ["layout-anim"] };
+EXPECT = { has: ["layout-anim"], allow: ["layout-anim"], animation: /Web Animation of (opacity, height|height, opacity) 300ms ease-out/ };
 trigger = async () => {
   const a = panel.animate({ height: ["0px", "120px"], opacity: [0, 1] }, { duration: 300, easing: "ease-out" });
   await a.finished;
