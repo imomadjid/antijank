@@ -13,14 +13,14 @@ def svg(dark):
         bar='#2d333b' if dark else '#e3e8ee',
         bad='#ff7b72' if dark else '#cf222e',
     )
-    W, H = 960, 452
+    W, H = 960, 476
     sans = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
     mono = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
     o = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" aria-label="Seven frames of a card sliding down. In frame 4 it lands 38px below its path for one frame, then snaps back. antijank reports it as a HIGH blip.">',
          f'<rect x="0.5" y="0.5" width="{W-1}" height="{H-1}" rx="16" fill="{c["bg"]}" stroke="{c["line"]}"/>',
          f'<text x="48" y="58" font-family="{sans}" font-size="15" font-weight="600" fill="{c["text"]}">A card slides down and lands 38px off its path for one frame.</text>',
          f'<text x="48" y="82" font-family="{sans}" font-size="13" fill="{c["muted"]}">Too short for a screenshot to catch. antijank reads it from the numbers.</text>',
-         f'<text x="{W-48}" y="82" text-anchor="end" font-family="{mono}" font-size="12" fill="{c["muted"]}">frames 1–7 of 31</text>']
+         f'<text x="{W-48}" y="82" text-anchor="end" font-family="{mono}" font-size="12" fill="{c["muted"]}">frames 1–7 of 30</text>']
     tw, th, gap, x0, y0 = 112, 168, 12, 48, 108
     # card y per frame (inside tile); frame index 3 is the blip
     # The recorded positions (px): 0, 12, 24, then 68 for one frame where 30 was due, 36, 44, 48.
@@ -38,10 +38,11 @@ def svg(dark):
         o.append(f'<rect x="{x+16}" y="{y0+ys[i]}" width="{tw-32}" height="40" rx="6" fill="{c["bad"] if bad else c["card"]}" opacity="{1 if bad else 0.9}"/>')
         o.append(f'<text x="{x+tw/2}" y="{y0+th+22}" text-anchor="middle" font-family="{mono}" font-size="12" fill="{c["bad"] if bad else c["muted"]}">frame {i+1}</text>')
     ry = y0 + th + 48
-    o.append(f'<rect x="48" y="{ry}" width="{W-96}" height="80" rx="10" fill="{c["panel"]}" stroke="{c["line"]}"/>')
+    o.append(f'<rect x="48" y="{ry}" width="{W-96}" height="104" rx="10" fill="{c["panel"]}" stroke="{c["line"]}"/>')
     lines = [
-        (c['muted'], 'antijank 0.2.0 · settled after 480ms · 31 frames · 4 elements · probe 0.26ms/frame'),
-        (c['bad'], 'HIGH   +47ms    div#card — was 38px down of its place for 1 frame, then snapped back'),
+        (c['muted'], 'antijank 0.2.1 · settled in 480ms · 30 frames · 4 elements'),
+        (c['bad'], 'HIGH    +47ms   div#card'),
+        (c['text'], '                sat 38px below its place for 1 frame, then snapped back'),
     ]
     for k, (col, t) in enumerate(lines):
         t = t.replace('&', '&amp;').replace('<', '&lt;')

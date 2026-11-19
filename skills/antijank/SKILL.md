@@ -27,8 +27,8 @@ The CDN loader fetches this exact version, and the integrity hash makes the brow
 ```js
 await new Promise((ok, fail) => {
   const s = document.createElement('script');
-  s.src = 'https://cdn.jsdelivr.net/npm/antijank@0.2.0/skills/antijank/scripts/probe.min.js';
-  s.integrity = 'sha384-gbt1FS2nRYbhwU3zqdkxuKbH6++BQeLIjkpVPLNNOwbu361o2lV0U6li+N879FDf';
+  s.src = 'https://cdn.jsdelivr.net/npm/antijank@0.2.1/skills/antijank/scripts/probe.min.js';
+  s.integrity = 'sha384-1b672yGBBF0urd2OjDDX2ur+Q/cMY3vPsIEIrV1CfK7u4TofSXFSEBRGoxySkdj+';
   s.crossOrigin = 'anonymous';
   s.onload = ok;
   s.onerror = () => fail(new Error('antijank: CDN script blocked (Content-Security-Policy or offline)'));
@@ -111,7 +111,7 @@ Without `hold`, the recording settles as soon as nothing has moved for about 330
 | `jump` (start) | Big first step, then a smooth move | Animation starts from the wrong origin, or the first frame paints before the start value is set |
 | `jump` (end) / snap | Smooth move, then a snap at the end | Wrong target (stale measurement), or the transform is cleared before the layout matches |
 | `jump` (mid) | One frame far bigger than its neighbours | Layout changed mid-animation (content arrived), or two animations handing over |
-| `shift` | A resting element moved in one frame | Something above it was inserted, removed or resized with no animation. `[cause: …]` names an insertion, removal or move; `[same frame: …]` names a resize in the same frame, a likely cause rather than a proven one. Animate the size, reserve space, or overlay instead |
+| `shift` | A resting element moved in one frame | Something above it was inserted, removed or resized with no animation. A `cause:` line names an insertion, removal or move; a `same frame:` line names a resize in the same frame, a likely cause rather than a proven one. Animate the size, reserve space, or overlay instead |
 | `pop-in` / `pop-out` | Appeared or vanished at full opacity (unanimated) | Fine if instant is intended. Otherwise there is no enter or exit animation, or the enter transition never ran because the starting style was never rendered (class removed in the same frame it was added) |
 | `flash` | Visible for only 1–2 frames | A placeholder or stale state rendering for a frame; conditional rendering flip-flopping |
 | `flicker` | Opacity dipped and came back | Remount (key change), a state reset, or an exit animation restarting |
@@ -123,10 +123,10 @@ Without `hold`, the recording settles as soon as nothing has moved for about 330
 | `stretch` | Text scaled unevenly | Scale animation on a box with text; counter-scale its children or animate size |
 | `scroll-jump` / `scroll-fight` | Scroll position jumped or changed direction | Programmatic scroll without smoothing, scroll anchoring, or two followers |
 | `slow-frame` | A frame took 50ms or more | Main-thread work during the animation (the script is named). "Forced layout" means a script read layout (`offsetHeight`, `getBoundingClientRect`) right after changing styles, usually in a loop: read everything first, then write |
-| `slow-response` | A click, Enter, Space or Escape showed nothing for 100ms or more | No pressed or pending state while work or a request runs. Show one at once. `[cause: main thread busy …]` means a slow handler kept the response from painting |
+| `slow-response` | A click, Enter, Space or Escape showed nothing for 100ms or more | No pressed or pending state while work or a request runs. Show one at once. A `cause: main thread busy …` line means a slow handler kept the response from painting |
 | `layout-anim` | Animates width, height, top, margin and similar | Runs layout every frame. Fine for small accordions; prefer transforms for big or frequent motion |
 
-Motion findings name the animation that was moving the element, or an ancestor, at that frame: `[animation: transition transform 300ms ease-out]`, `[animation: animation slide-in 400ms ease on div.panel]` or `[animation: Web Animation of opacity, transform 200ms linear]`. Go to that rule or call first. No animation named usually means the motion is driven by script (requestAnimationFrame, a spring library) or isn't animated at all.
+Motion findings name the animation that was moving the element, or an ancestor, at that frame, on an `animation:` line: `transition transform 300ms ease-out`, `@keyframes slide-in 400ms ease on div.panel` or `Web Animation of opacity, transform 200ms linear`. Go to that rule or call first. No animation named usually means the motion is driven by script (requestAnimationFrame, a spring library) or isn't animated at all.
 
 ## Expectations
 
@@ -160,7 +160,8 @@ Pass `expect` (option or `--expect`) to get pass/fail lines and exit code 1 on f
 - At most 1500 elements are watched from the start, plus 1000 added during the recording. Past that the report warns that findings may be missing; narrow `root`.
 - A recording settles about 330ms after the last change, so a response slower than that falls outside it and isn't measured. For slow actions (network, heavy work), add a `wait` step after the click or pass `waitFor` with a selector for the result.
 - Streaming text grows continuously, so expect `shift` findings caused by "grew taller (text changed)". Judge whether that growth should be smoothed.
-- The header line shows the probe's cost per frame: roughly 4–8ms per 1000 elements on a fast laptop, more with the CPU slowed. Reading layout after every frame can disturb a page that is already near its frame budget, so if the cost is above about 4ms, narrow `root`.
+- The probe's cost per frame is in the JSON (`probeMs`): roughly 4–8ms per 1000 elements on a fast laptop, more with the CPU slowed. Reading layout after every frame can disturb a page that is already near its frame budget, so the report adds a note above about 4ms; then narrow `root`.
+- Each finding is a block: severity, time and element on the first line, then what happened, and `cause:`, `same frame:` or `animation:` lines. To filter the text, use `grep -A3 '^HIGH'`; for anything more, read the JSON (`antijank.result()`, or the runner's `--json`).
 - Thresholds can be overridden: `{ thresholds: { shift: 4, popArea: 1000 } }` (see `antijank.thresholds`).
 
 ## What it can't see

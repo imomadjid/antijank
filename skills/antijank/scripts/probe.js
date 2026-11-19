@@ -8,7 +8,7 @@
 (() => {
   if (typeof window === 'undefined' || (window.antijank && window.antijank.version)) return;
 
-  const VERSION = '0.2.0';
+  const VERSION = '0.2.1';
 
   const THRESHOLDS = {
     eps: 0.5, // px: movement below this is noise
@@ -592,7 +592,7 @@
           delay: timing.delay || 0,
           easing,
           label: a.animationName
-            ? `animation ${a.animationName}`
+            ? `@keyframes ${a.animationName}`
             : a.transitionProperty
               ? `transition ${a.transitionProperty}`
               : `Web Animation${a.id ? ` "${a.id}"` : ''} of ${props.join(', ') || 'unknown properties'}`,
@@ -1511,10 +1511,10 @@
       case 'shift':
         return `moved ${dirWord(x.axis, n)} ${px(n)} in one frame, with no transition`;
       case 'blip':
-        return `was ${px(n)} ${dirWord(x.axis, n)} of its place for ${x.frames} frame${x.frames > 1 ? 's' : ''}, then snapped back`;
+        return `sat ${px(n)} ${x.axis === 'y' ? (n > 0 ? 'below' : 'above') : n > 0 ? 'right of' : 'left of'} its place for ${x.frames} frame${x.frames > 1 ? 's' : ''}, then snapped back`;
       case 'jump':
-        if (x.where === 'start') return `jumped ${px(n)} on its first moving frame, then animated (wrong starting frame?)`;
-        if (x.where === 'end') return `snapped ${px(n)} at the end of its move (moving ~${px(x.perFrame)}/frame before)`;
+        if (x.where === 'start') return `first step jumped ${px(n)}, then it animated (wrong start?)`;
+        if (x.where === 'end') return `snapped ${px(n)} at the end of its move (was ~${px(x.perFrame)}/frame)`;
         return `jumped ${px(n)} in one frame mid-move (moving ~${px(x.perFrame)}/frame)`;
       case 'reversal':
         return `turned back ${px(n)} after ${pct(x.progress)} of a ${px(x.travel)} move`;
@@ -1533,7 +1533,7 @@
       case 'flash':
         return `was visible for only ${x.frames} frame${x.frames > 1 ? 's' : ''}`;
       case 'flicker':
-        if (x.remount) return `went blank for ${x.frames} frame${x.frames > 1 ? 's' : ''} while an identical copy replaced it (remount)`;
+        if (x.remount) return `went blank for ${x.frames} frame${x.frames > 1 ? 's' : ''}: remounted as an identical copy`;
         return x.to === 0
           ? `vanished for ${x.frames} frame${x.frames > 1 ? 's' : ''}, then came back`
           : `opacity flickered ${round(x.from, 2)} → ${round(x.to, 2)} and back within ${x.frames} frame${x.frames > 1 ? 's' : ''}`;
@@ -1818,6 +1818,10 @@
         detail: top.length
           ? `${top.length} moved more than ${max}px: ` + top.slice(0, 3).map((m) => `${descOf(m.tr)} ${px(m.worst)}`).join('; ')
           : `nothing moved more than ${max}px`,
+        // The same, structured, for the report and for code reading the JSON.
+        summary: top.length ? `${top.length} moved more than ${max}px` : undefined,
+        moved: top.length ? top.slice(0, 3).map((m) => ({ element: descOf(m.tr), px: round(m.worst, 1) })) : undefined,
+        more: top.length > 3 ? top.length - 3 : undefined,
       });
     }
     if (spec.noFindings) {
@@ -1830,55 +1834,111 @@
 
   // ---------- report ----------
 
+  // The text report: one block per finding, under 72 columns so it reads the same in a
+  // narrow terminal, a CI log or a README. Plain text: agents read it through browser
+  // tools, and the runner adds colour only when it prints to a terminal.
+  const WIDTH = 72;
+  const COL = 16; // where a finding's details start: "HIGH    +10ms   "
+  // The runner's --matrix summary (run.mjs) uses the same width and column.
+  // Words in parentheses stay together, "(moving ~5.6px/frame)", so wrapping never splits
+  // a value; anything longer than a line is broken at the edge.
+  function words(text) {
+    const out = [];
+    let depth = 0;
+    for (const w of String(text).split(/\s+/)) {
+      if (!w) continue;
+      if (depth > 0) out[out.length - 1] += ' ' + w;
+      else out.push(w);
+      for (const ch of w) depth = Math.max(0, depth + (ch === '(' ? 1 : ch === ')' ? -1 : 0));
+    }
+    return out;
+  }
+  function wrap(prefix, text, indent) {
+    const out = [];
+    let cur = prefix;
+    let fresh = true; // nothing after the prefix yet, so the next word joins it whatever its length
+    const newLine = () => {
+      out.push(cur.trimEnd());
+      cur = ' '.repeat(indent);
+      fresh = true;
+    };
+    for (let w of words(text)) {
+      if (!fresh && cur.length + 1 + w.length > WIDTH) newLine();
+      while (cur.length + (fresh ? 0 : 1) + w.length > WIDTH) {
+        const room = WIDTH - cur.length - (fresh ? 0 : 1);
+        if (room < 8) break;
+        cur += (fresh ? '' : ' ') + w.slice(0, room);
+        w = w.slice(room);
+        newLine();
+      }
+      cur += (fresh ? '' : ' ') + w;
+      fresh = false;
+    }
+    out.push(cur.trimEnd());
+    return out;
+  }
+
+  function block(x) {
+    const pad = ' '.repeat(COL);
+    const lines = wrap(`${x.severity.toUpperCase().padEnd(8)}${('+' + x.t + 'ms').padEnd(7)} `, x.element, COL);
+    lines.push(...wrap(pad, x.message, COL));
+    if (x.cause) lines.push(...wrap(pad, `${x.causeSure === false ? 'same frame' : 'cause'}: ${x.cause}`, COL + 2));
+    if (x.animation) lines.push(...wrap(pad, `animation: ${x.animation}`, COL + 2));
+    return lines;
+  }
+
   function report(result, opts) {
     const r = result || (last && last.result);
     if (!r) return 'antijank: nothing recorded yet';
     const maxLines = (opts && opts.maxLines) || (last && last.opts.maxLines) || DEFAULTS.maxLines;
-    const head = [
-      `antijank ${r.version}`,
-      r.status === 'settled' ? `settled after ${r.duration}ms` : r.status === 'timeout' ? `did not settle within ${r.duration}ms` : r.status,
-      `${r.frames} frames`,
-      `${r.elements} elements`,
-      `probe ${r.probeMs ? r.probeMs.avg : '?'}ms/frame`,
-    ].join(' · ');
-    const lines = [head];
-    if (r.truncated)
-      lines.push(`warning: ${r.truncated} elements were not watched (over maxElements), so findings may be missing. Narrow \`root\`.`);
-    if (r.loops && r.loops.length) lines.push(`left out as continuous loops: ${r.loops.join('; ')}`);
-    if (r.viewTransition)
-      lines.push(
-        `a View Transition ran +${r.viewTransition.from}–${r.viewTransition.to}ms; it animates ::view-transition snapshots the probe can't see, so ${r.viewTransition.leftOut} element finding${r.viewTransition.leftOut === 1 ? '' : 's'} from that window ${r.viewTransition.leftOut === 1 ? 'was' : 'were'} left out`
+    const when =
+      r.status === 'settled' ? `settled in ${r.duration}ms` : r.status === 'timeout' ? `did not settle in ${r.duration}ms` : r.status;
+    const facts = [`antijank ${r.version}`, when];
+    if (r.frames != null) facts.push(`${r.frames} frames`, `${r.elements} elements`);
+    const head = [facts.join(' · ')];
+    const note = (text) => head.push(...wrap('note: ', text, 6));
+    if (r.truncated) note(`${r.truncated} elements were not watched (over maxElements), so findings may be missing. Narrow \`root\`.`);
+    if (r.loops && r.loops.length) note(`left out as continuous loops: ${r.loops.join('; ')}`);
+    if (r.viewTransition) {
+      const n = r.viewTransition.leftOut;
+      note(
+        `a View Transition ran +${r.viewTransition.from}–${r.viewTransition.to}ms. It animates snapshots the probe can't see, so ${n} element finding${n === 1 ? '' : 's'} from that window ${n === 1 ? 'was' : 'were'} left out.`
       );
+    }
     if (r.stallJumps)
-      lines.push(`left out: ${r.stallJumps} jump${r.stallJumps > 1 ? 's' : ''} after a slow frame on compositor animations, which keep moving on screen while the main thread is busy`);
+      note(`left out ${r.stallJumps} jump${r.stallJumps > 1 ? 's' : ''} after a slow frame on compositor animations, which keep moving on screen while the main thread is busy`);
     if (r.stillChanging && r.stillChanging.length)
-      lines.push(`still changing at the end: ${r.stillChanging.join('; ')} (raise timeout, pass waitFor, or ignore them)`);
-    if (r.status === 'hidden') lines.push('The page is hidden, so the browser pauses frames. Show the tab or pane and record again.');
-    if (r.error) lines.push(`error: ${r.error}`);
+      note(`still changing at the end: ${r.stillChanging.join('; ')}. Raise timeout, pass waitFor, or ignore them.`);
+    if (r.status === 'hidden') note('the page is hidden, so the browser pauses frames. Show the tab or pane and record again.');
+    if (r.probeMs && r.probeMs.avg > 4) note(`the probe took ${r.probeMs.avg}ms per frame; narrow \`root\` so it doesn't disturb timing`);
+    // A stack trace is for the JSON; the report keeps its first line.
+    if (r.error) head.push(...wrap('error: ', String(r.error).split('\n')[0], 7));
+
+    const sections = [head];
     const fs = r.findings || [];
-    if (!fs.length && r.status !== 'hidden' && !r.error) lines.push('no jank found');
-    const line = (x) =>
-      `${x.severity.toUpperCase().padEnd(6)} ${('+' + x.t + 'ms').padEnd(8)} ${x.element} — ${x.message}${
-        x.cause ? ` [${x.causeSure === false ? 'same frame' : 'cause'}: ${x.cause}]` : ''
-      }${x.animation ? ` [animation: ${x.animation}]` : ''}`;
-    const defects = fs.filter((x) => x.group !== 'unanimated');
-    const unanimated = fs.filter((x) => x.group === 'unanimated');
-    let shown = 0;
-    for (const x of defects.slice(0, maxLines)) {
-      lines.push(line(x));
-      shown++;
+    if (!fs.length && r.status !== 'hidden' && !r.error) sections.push(['no jank found']);
+    const defects = fs.filter((x) => x.group !== 'unanimated').slice(0, maxLines);
+    const unanimated = fs.filter((x) => x.group === 'unanimated').slice(0, Math.max(3, maxLines - defects.length));
+    if (defects.length) sections.push(defects.flatMap(block));
+    if (unanimated.length) sections.push(['Unanimated, fine if instant is intended (tabs, menus, keys)', ...unanimated.flatMap(block)]);
+    const moreD = fs.filter((x) => x.group !== 'unanimated').length - defects.length;
+    const moreU = fs.filter((x) => x.group === 'unanimated').length - unanimated.length;
+    if (moreD + moreU > 0) {
+      const parts = [moreD ? `${moreD} defect${moreD > 1 ? 's' : ''}` : '', moreU ? `${moreU} unanimated` : ''].filter(Boolean);
+      sections.push(wrap('', `+${parts.join(' and ')} more in antijank.result().findings`, 0));
     }
-    if (unanimated.length) {
-      lines.push('unanimated, fine if instant is intended (tabs, menus, frequent or keyboard-driven UI):');
-      for (const x of unanimated.slice(0, Math.max(3, maxLines - shown))) {
-        lines.push('  ' + line(x));
-        shown++;
-      }
-    }
-    if (fs.length > shown) lines.push(`(+${fs.length - shown} more in antijank.result().findings)`);
-    for (const e of r.expectations || []) lines.push(`expect ${e.pass ? '✓' : '✗'} ${e.name}: ${e.detail}`);
-    if (r.probeMs && r.probeMs.avg > 4) lines.push(`note: the probe took ${r.probeMs.avg}ms per frame; narrow \`root\` so it doesn't disturb timing`);
-    return lines.join('\n');
+    const ex = r.expectations || [];
+    if (ex.length)
+      sections.push([
+        'Expectations',
+        ...ex.flatMap((e) => [
+          ...wrap(`${e.pass ? '✓' : '✗'} `, `${e.name}: ${e.summary || e.detail}`, 2),
+          ...(e.moved && e.moved.length
+            ? wrap('  ', [...e.moved.map((m) => `${m.element} ${px(m.px)}`), ...(e.more ? [`+${e.more} more`] : [])].join(', '), 2)
+            : []),
+        ]),
+      ]);
+    return sections.map((x) => x.join('\n')).join('\n\n');
   }
 
   // ---------- public API ----------

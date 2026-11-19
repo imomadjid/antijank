@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // antijank runner: opens a page in headless Chromium with the probe loaded, performs steps,
 // and prints what moved or faded wrongly. Uses the Playwright already in your project.
-import { parseArgs } from 'node:util';
+import { parseArgs, styleText } from 'node:util';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -9,6 +9,53 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PROBE = join(here, 'probe.js');
+
+// Colour for a person at a terminal. styleText leaves text plain when stdout isn't a TTY
+// (piped, CI logs, coding agents) and follows NO_COLOR and FORCE_COLOR.
+const style = (format, text) => styleText(format, text, { stream: process.stdout });
+const SEV_STYLE = { HIGH: ['bold', 'red'], MEDIUM: ['bold', 'yellow'], LOW: 'dim' };
+// Same rules as wrap() in probe.js, which can't be imported here: 72 columns, details at
+// column 16, words in parentheses kept together.
+const WIDTH = 72;
+function wrap(prefix, text, indent) {
+  const words = [];
+  let depth = 0;
+  for (const w of String(text).split(/\s+/)) {
+    if (!w) continue;
+    if (depth > 0) words[words.length - 1] += ' ' + w;
+    else words.push(w);
+    for (const ch of w) depth = Math.max(0, depth + (ch === '(' ? 1 : ch === ')' ? -1 : 0));
+  }
+  const out = [];
+  let cur = prefix;
+  let fresh = true;
+  for (const w of words) {
+    if (!fresh && cur.length + 1 + w.length > WIDTH) {
+      out.push(cur.trimEnd());
+      cur = ' '.repeat(indent) + w;
+    } else cur += (fresh ? '' : ' ') + w;
+    fresh = false;
+  }
+  out.push(cur.trimEnd());
+  return out;
+}
+
+function paint(report) {
+  return report
+    .split('\n')
+    .map((line) => {
+      let m;
+      if ((m = line.match(/^(HIGH|MEDIUM|LOW)( +)(\+\d+ms)?(.*)$/))) return style(SEV_STYLE[m[1]], m[1]) + m[2] + (m[3] ? style('dim', m[3]) : '') + m[4];
+      if ((m = line.match(/^( +)(cause|same frame|animation|seen in):(.*)$/))) return m[1] + style('dim', m[2] + ':') + m[3];
+      if ((m = line.match(/^([✓✗])(.*)$/))) return style(m[1] === '✓' ? 'green' : 'red', m[1]) + m[2];
+      if ((m = line.match(/^(note|error):(.*)$/))) return style(m[1] === 'error' ? 'red' : 'yellow', m[1] + ':') + m[2];
+      if (/^(Unanimated, |Expectations$|── )/.test(line)) return style('bold', line);
+      if (line === 'no jank found') return style('green', line);
+      if ((m = line.match(/^(antijank \S+)(.*)$/))) return style('bold', m[1]) + style('dim', m[2]);
+      return line;
+    })
+    .join('\n');
+}
 
 const HELP = `antijank: catch one-frame UI glitches (jumps, flashes, pop-ins, pushed neighbours)
 
@@ -297,8 +344,8 @@ async function main() {
 
   const multi = all.length > 1;
   for (const r of all) {
-    if (multi) console.log(`\n── ${r.name} · ${r.condition}${runs > 1 ? ` · run ${r.run}/${runs}` : ''}`);
-    console.log(r.report);
+    if (multi) console.log('\n' + paint(wrap('── ', `${r.name} · ${r.condition}${runs > 1 ? ` · run ${r.run}/${runs}` : ''}`, 3).join('\n')));
+    console.log(paint(r.report));
   }
   if (multi) {
     // Which findings appear under which conditions.
@@ -313,11 +360,16 @@ async function main() {
         hits.get(r.condition).add(r.run);
       }
     if (seen.size) {
-      console.log('\n── summary');
+      // The same block layout as the report, with the conditions each finding showed up in.
+      const names = new Set([...seen.values()].map((s) => s.name));
+      const lines = ['── summary'];
       for (const { f, name, hits } of [...seen.values()].sort((a, b) => SEV[b.f.severity] - SEV[a.f.severity])) {
-        const where = conditions.map((c) => `${c.name} ${hits.has(c.name) ? hits.get(c.name).size : 0}/${runs}`).join(', ');
-        console.log(`${f.severity.toUpperCase().padEnd(6)} ${name}: ${f.element} — ${f.message} (${where})`);
+        const where = conditions.map((c) => `${c.name} ${hits.has(c.name) ? hits.get(c.name).size : 0}/${runs}`).join(' · ');
+        const pad = ' '.repeat(16);
+        lines.push(...wrap(f.severity.toUpperCase().padEnd(16), `${names.size > 1 ? `${name}: ` : ''}${f.element}`, 16));
+        lines.push(...wrap(pad, f.message, 16), ...wrap(pad, `seen in: ${where}`, 18));
       }
+      console.log('\n' + paint(lines.join('\n')));
     }
   }
   if (v.json) writeFileSync(v.json, JSON.stringify(all.map(({ report, ...rest }) => rest), null, 2));

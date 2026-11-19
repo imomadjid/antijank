@@ -19,7 +19,7 @@ test('clean page: no findings, exit 0', () => {
 test('failed expectation: exit 1 and names the movers', () => {
   const r = run(fixture('push-shift.html'), '--steps', trigger, '--expect', '{"still":"others"}');
   assert.equal(r.status, 1, r.stderr);
-  assert.match(r.stdout, /expect ✗ still others/);
+  assert.match(r.stdout, /✗ still others: 4 moved more than 1px\n  div\.row "a" 44px/);
   assert.match(r.stdout, /cause: div#banner inserted/);
 });
 
@@ -32,7 +32,7 @@ test('--fail-on high trips on a blip', () => {
 test('--matrix compares conditions', () => {
   const r = run(fixture('flip-flash.html'), '--steps', trigger, '--matrix');
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /normal 1\/1, cpu×4 1\/1, reduced motion 1\/1/);
+  assert.match(r.stdout, /seen in: normal 1\/1 · cpu×4 1\/1 · reduced motion 1\/1/);
 });
 
 test('records a page load by default', () => {
@@ -72,14 +72,14 @@ for (const cpu of ['1', '4']) {
   test(`a one-frame late FLIP behind a real click is caught (cpu ×${cpu})`, () => {
     const r = run(fixture('late-flip-click.html'), '--click', '#add', '--cpu', cpu, '--runs', '3');
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /snapped back \(cpu×\d 3\/3\)|snapped back \(normal 3\/3\)/);
+    assert.match(r.stdout, /snapped back\n +seen in: (cpu×\d|normal) 3\/3/);
   });
 }
 
 test('a real click that shows nothing for 250ms is a slow response', () => {
   const r = run(fixture('slow-response.html'), '--click', '#btn');
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /button#btn — took \d+ms to show any response to the click/);
+  assert.match(r.stdout, /button#btn\n +took \d+ms to show any response to the click/);
 });
 
 test('a real click answered at once is not a slow response', () => {
@@ -92,4 +92,21 @@ test('a hover transition under the pointer does not hide a slow response', () =>
   const r = run(fixture('slow-response-hover.html'), '--click', '#btn');
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /took \d+ms to show any response to the click/);
+});
+
+test('the report and the matrix summary fit in 72 columns, with no colour codes when piped', () => {
+  const r = run(fixture('remount-gap.html'), '--steps', trigger, '--expect', '{"still":"others"}', '--matrix');
+  const lines = r.stdout.trimEnd().split('\n');
+  assert.ok(lines.length > 5);
+  for (const line of lines) assert.ok(line.length <= 72, `too wide (${line.length}): ${line}`);
+  assert.doesNotMatch(r.stdout, /\x1b\[/);
+});
+
+test('FORCE_COLOR colours severities for a terminal', () => {
+  const r = spawnSync(process.execPath, [join(root, 'skills/antijank/scripts/run.mjs'), fixture('push-shift.html'), '--steps', trigger], {
+    cwd: root,
+    encoding: 'utf8',
+    env: Object.fromEntries([...Object.entries(process.env).filter(([k]) => k !== 'NO_COLOR'), ['FORCE_COLOR', '1']]),
+  });
+  assert.match(r.stdout, /\x1b\[1m\x1b\[31mHIGH/);
 });

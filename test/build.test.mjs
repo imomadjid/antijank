@@ -67,3 +67,27 @@ test('the CDN loader in SKILL.md loads the probe, and refuses a different file',
     await browser.close();
   }
 });
+
+test('the report stays within 72 columns for long names, late findings and errors', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    await page.addScriptTag({ path: SOURCE });
+    const out = await page.evaluate(() => {
+      const long = 'div.card__header--is-expanded-and-pinned.card__header--with-a-very-long-modifier';
+      const finding = (over) => ({ severity: 'high', group: 'defect', t: 12345, element: long, message: 'jumped 106px in one frame mid-move (moving ~5.6px/frame before the jump happened)', cause: `${long} inserted`, causeSure: true, animation: 'transition transform 300ms cubic-bezier(0.2, 0, 0, 1)', ...over });
+      const result = { version: 'x', status: 'settled', duration: 1, frames: 2, elements: 3, findings: Array.from({ length: 14 }, () => finding()), expectations: [] };
+      const error = { version: 'x', status: 'error', error: 'TypeError: something broke\n    at analyze (probe.js:1:2)', findings: [], expectations: [] };
+      return [antijank.report(result), antijank.report(error)];
+    });
+    for (const text of out) for (const line of text.split('\n')) assert.ok(line.length <= 72, `too wide (${line.length}): ${line}`);
+    assert.match(out[0], /\+12345ms div\.card/);
+    assert.match(out[0], /\(moving ~5\.6px\/frame before the jump happened\)/);
+    assert.match(out[0], /cubic-bezier\(0\.2, 0, 0, 1\)/);
+    assert.match(out[0], /\+4 defects more/);
+    assert.doesNotMatch(out[1], /undefined|at analyze/);
+    assert.match(out[1], /error: TypeError: something broke/);
+  } finally {
+    await browser.close();
+  }
+});

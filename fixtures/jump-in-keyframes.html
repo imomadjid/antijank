@@ -3,7 +3,7 @@
 <style>@keyframes slide{0%{transform:translateX(0)}49%{transform:translateX(98px)}50%{transform:translateX(200px)}100%{transform:translateX(300px)}}.go{animation:slide .6s linear forwards}</style>
 <body><div class="box" id="card" style="margin:20px"></div>
 <script>
-EXPECT = { has: ["jump"], animation: /animation slide 600ms linear/ };
+EXPECT = { has: ["jump"], animation: /@keyframes slide 600ms linear/ };
 trigger = async () => {
   card.classList.add("go");
   await new Promise((r) => card.addEventListener("animationend", r, { once: true }));

@@ -1,6 +1,6 @@
 {
   "name": "antijank",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Catches one-frame UI glitches coding agents can't see in screenshots: records every element's position and opacity on every frame and reports jumps, flashes, pop-ins and pushed neighbours as text.",
   "type": "module",
   "license": "MIT",
@@ -27,7 +27,7 @@
     "skills/antijank"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "scripts": {
     "build": "node scripts/build.mjs",

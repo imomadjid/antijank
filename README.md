@@ -18,11 +18,19 @@ Agents check UI with screenshots, and jank lives between them. A card that lands
 antijank records every element's position and opacity on every frame of an interaction in a real browser, and reports what went wrong in a few lines of text:
 
 ```text
-antijank 0.2.0 · settled after 343ms · 22 frames · 7 elements · probe 0.34ms/frame
-HIGH   +10ms    div.row "a" ×4 — moved down 44px in one frame, with no transition [cause: div#banner inserted (1248×40)]
-unanimated, fine if instant is intended (tabs, menus, frequent or keyboard-driven UI):
-  MEDIUM +10ms    div#banner — appeared at full opacity with no fade (1248×40)
-expect ✗ still others: 4 moved more than 1px: div.row "a" 44px; div.row "b" 44px; div.row "c" 44px
+antijank 0.2.1 · settled in 349ms · 23 frames · 7 elements
+
+HIGH    +16ms   div.row "a" ×4
+                moved down 44px in one frame, with no transition
+                cause: div#banner inserted (1248×40)
+
+Unanimated, fine if instant is intended (tabs, menus, keys)
+MEDIUM  +16ms   div#banner
+                appeared at full opacity with no fade (1248×40)
+
+Expectations
+✗ still others: 4 moved more than 1px
+  div.row "a" 44px, div.row "b" 44px, div.row "c" 44px, +1 more
 ```
 
 It's an [Agent Skill](https://skills.sh), the format Claude Code, Codex, Cursor and other agents load, plus a plain Node runner you can use without an agent.
@@ -98,7 +106,7 @@ Defects, listed first:
 
 Unanimated changes, listed apart: `pop-in`, `pop-out`, `swap` and `opacity-snap` mean something changed with no transition. That's often right: tabs, menus and anything frequent or keyboard-driven should be instant. Pin what you want with an expectation instead of adding animation to clear a finding.
 
-Motion findings name the animation that was moving the element, such as `[animation: transition transform 300ms ease-out]`, so your agent goes straight to the rule that needs fixing.
+Motion findings name the animation that was moving the element, such as `animation: transition transform 300ms ease-out`, so your agent goes straight to the rule that needs fixing.
 
 Expectations turn a recording into a test. `moves`, `still`, `fadesIn`, `fadesOut` and `noFindings` pass or fail, and the runner exits 1 on a failure. See [SKILL.md](https://github.com/imomadjid/antijank/blob/main/skills/antijank/SKILL.md) for the full list and the usual cause of each finding.
 
@@ -140,11 +148,13 @@ await antijank.release();
 
 A small probe samples the page after every painted frame. It reads each watched element's box, its opacity through its ancestors, its visible area after clipping, and the scroll positions. Right after real input, Chromium can render several frames back to back; the probe then samples each one at the start of the next, so none is skipped. Only changes are stored, and the detectors run once, at the end.
 
-Positions are kept in both viewport and page coordinates, and each element is judged in whichever one it moved less, so scrolling isn't movement. Clipping follows containing blocks, so an absolute popover inside an `overflow: hidden` wrapper counts as visible when it is. A mutation observer records what was inserted, removed or moved in the frame that pushed something; a resize in the same frame is reported as `[same frame: …]`, a likely cause rather than a proven one.
+Positions are kept in both viewport and page coordinates, and each element is judged in whichever one it moved less, so scrolling isn't movement. Clipping follows containing blocks, so an absolute popover inside an `overflow: hidden` wrapper counts as visible when it is. A mutation observer records what was inserted, removed or moved in the frame that pushed something; a resize in the same frame is reported as `same frame: …`, a likely cause rather than a proven one.
 
 To keep the report short, only elements that draw something can report, nested elements reporting the same thing collapse into the outermost one, and a subtree inserted at once is one finding. Infinite animations, JavaScript loops and `[data-antijank-ignore]` are left out. Short stalls (up to about four frames) aren't mistaken for jumps.
 
-The probe's own cost per frame is in the header line: roughly 4–8ms per 1,000 watched elements on a fast laptop, far less with a scoped `root`. Reading layout every frame can disturb a page that is already near its frame budget, so keep `root` narrow.
+The report keeps every line under 72 columns, so it reads the same in a narrow terminal, a CI log or this README. In a terminal the runner adds colour; piped output, CI logs and agents get plain text, and `NO_COLOR` and `FORCE_COLOR` are respected.
+
+The probe's own cost per frame is in the JSON result (`probeMs`), and the report adds a note when it's high: roughly 4–8ms per 1,000 watched elements on a fast laptop, far less with a scoped `root`. Reading layout every frame can disturb a page that is already near its frame budget, so keep `root` narrow.
 
 ## What it can't see
 
